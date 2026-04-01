@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <map>
 #include <string>
 #include <system_error>
 
@@ -30,6 +31,7 @@ class SMTParser {
   using So = Sort<allocator_type>;
   using FSeq = typename F::Sequence;
 
+  std::map<std::string, So> declared_symbols; // Symbol name -> sort.
   bool error;   // If an error was found during parsing.
   bool silent;  // If we do not want to output error messages.
 
@@ -47,15 +49,16 @@ class SMTParser {
 				Identifier    <- < [a-zA-Z_][a-zA-Z0-9_]* >
 
 				BinaryOp      <- < '<=' / '>=' / '=' / '>' / '<' >
-				LogicOp       <- < 'and' / 'or' >
+				LogicOp       <- < 'and' / 'or' / 'not' >
 				ArithOp       <- < '+' / '-' / '*' / '/' >
+				VarType       <- < 'Real' / 'Bool' / 'Int' >
 
 				Term          <- Neg / Arith / Real / Integer / Identifier
 				Neg           <- '(' '-' Term ')'
 				Arith         <- '(' ArithOp Term Term ')'
 
-				DeclareVar    <- '(' 'declare-const' Identifier 'Real' ')'
-				DeclareFun    <- '(' 'declare-fun' Identifier '(' ')' 'Real' ')'
+				DeclareVar    <- '(' 'declare-const' Identifier VarType ')'
+				DeclareFun    <- '(' 'declare-fun' Identifier '(' ')' VarType ')'
         Formula       <- Bound / Constraint
         Bound         <- '(' BinaryOp Term Term ')'
         Constraint    <- '(' LogicOp Formula+ ')'
@@ -73,8 +76,10 @@ class SMTParser {
     parser["BinaryOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["ArithOp"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["VarType"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["DeclareVar"] = [this](const SV& sv) { return make_variable_decl(sv); };
     parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
+    parser["Term"] = [this](const SV& sv) { return make_term(sv[0]); };
     parser["Neg"] = [this](const SV& sv) { return make_neg(sv); };
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
@@ -122,14 +127,32 @@ class SMTParser {
   }
 
   F make_variable_decl(const SV& sv) { 
-    // For nnv project, all the variables wil be created in onnx_parser.hpp.
-    return F::make_true(); 
+    // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp 
+    // for the implementation of variable declaration.
+    auto name = std::any_cast<std::string>(sv[0]);
+    if (declared_symbols.contains(name)) {
+      return make_error(sv, "Variable `" + name + "` already declared.");
+    }
+
+    auto type_name = std::any_cast<std::string>(sv[1]);
+    So var_type(So::Real);
+    if (type_name == "Int") var_type = So::Int;
+    else if (type_name == "Real") var_type = So::Real;
+    else if (type_name == "Bool") var_type = So::Bool;
+    else {
+      return make_error(sv, "Unsupported variable type: `" + type_name + "`.");
+    }
+    
+    declared_symbols.emplace(name, var_type);
+    return F::make_exists(UNTYPED, LVar<allocator_type>(name.data()), std::move(var_type));
   }
 
-  F any_to_termF(const std::any& any) {
+  F make_term(const std::any& any) {
     try {
       return f(any);
     } catch (const std::bad_any_cast&) {
+      // For current implementation, if the term is not a F, 
+      // it should be an identifier, which is treated as a logical variable.
       auto name = std::any_cast<std::string>(any);
       return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
     }
@@ -145,11 +168,11 @@ class SMTParser {
       assert(arith_operator == "/");
       sig = DIV;
     }
-    return F::make_binary(any_to_termF(sv[1]), sig, any_to_termF(sv[2]));
+    return F::make_binary(f(sv[1]), sig, f(sv[2]));
   }
 
   F make_neg(const SV& sv) {
-    return F::make_unary(NEG, any_to_termF(sv[0]));
+    return F::make_unary(NEG, f(sv[0]));
   }
 
   F make_bound(const SV& sv) {
@@ -164,7 +187,7 @@ class SMTParser {
       sig = LT;
     }
 
-    return F::make_binary(any_to_termF(sv[1]), sig, any_to_termF(sv[2]));
+    return F::make_binary(f(sv[1]), sig, f(sv[2]));
   }
 
   F make_constraint(const SV& sv) {
@@ -176,8 +199,15 @@ class SMTParser {
 
     if (logic_operator == "and") {
       return F::make_nary(AND, std::move(seq));
-    } else {
+    } else if (logic_operator == "or") {
       return F::make_nary(OR, std::move(seq));
+    } else if (logic_operator == "not") {
+      if (seq.size() != 1) {
+        return make_error(sv, "`not` expects exactly one argument.");
+      }
+      return F::make_unary(NOT, std::move(seq[0]));
+    } else {
+      return make_error(sv, "Unsupported logical operator in constraint.");
     }
   }
 
