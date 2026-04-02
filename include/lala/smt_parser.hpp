@@ -30,6 +30,7 @@ class SMTParser {
   using SV = peg::SemanticValues;
   using So = Sort<allocator_type>;
   using FSeq = typename F::Sequence;
+  using LetBinding = std::pair<std::string, F>;
 
   std::map<std::string, So> declared_symbols; // Symbol name -> sort.
   bool error;   // If an error was found during parsing.
@@ -46,7 +47,7 @@ class SMTParser {
 				Real          <- < ('inf' / '-inf' /
 														[+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
 														([Ee][+-]?[0-9]+)) ) >
-				Identifier    <- < [a-zA-Z_][a-zA-Z0-9_]* >
+				Identifier    <- < [a-zA-Z_?][a-zA-Z0-9_?.-]* >
 
 				BinaryOp      <- < '<=' / '>=' / '=' / '>' / '<' >
 				LogicOp       <- < 'and' / 'or' / 'not' >
@@ -59,7 +60,10 @@ class SMTParser {
 
 				DeclareVar    <- '(' 'declare-const' Identifier VarType ')'
 				DeclareFun    <- '(' 'declare-fun' Identifier '(' ')' VarType ')'
-        Formula       <- Bound / Constraint
+        
+        Let           <- '(' 'let' '(' LetBinding+ ')' Formula ')'
+        LetBinding    <- '(' Identifier Formula ')'
+        Formula       <- Let / Bound / Constraint / Term
         Bound         <- '(' BinaryOp Term Term ')'
         Constraint    <- '(' LogicOp Formula+ ')'
         Assertion     <- '(' 'assert' Formula ')'
@@ -80,6 +84,8 @@ class SMTParser {
     parser["DeclareVar"] = [this](const SV& sv) { return make_variable_decl(sv); };
     parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
     parser["Term"] = [this](const SV& sv) { return make_term(sv[0]); };
+    parser["LetBinding"] = [this](const SV& sv) { return make_let_binding(sv); };
+    parser["Let"] = [this](const SV& sv) { return make_let(sv); };
     parser["Neg"] = [this](const SV& sv) { return make_neg(sv); };
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
@@ -151,11 +157,61 @@ class SMTParser {
     try {
       return f(any);
     } catch (const std::bad_any_cast&) {
-      // For current implementation, if the term is not a F, 
+      // For current implementation, if the term is not an F, 
       // it should be an identifier, which is treated as a logical variable.
       auto name = std::any_cast<std::string>(any);
       return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
     }
+  }
+
+  // Construct a let binding pair
+  LetBinding make_let_binding(const SV& sv) {
+    auto name = std::any_cast<std::string>(sv[0]);
+    // First element is the name of the variable to be replaced in the body of the let expression,
+    // and the second element is the formula to be bound to that variable.
+    return LetBinding(std::move(name), f(sv[1]));
+  }
+
+  // Substitute the let bindings in the body of the let expression with the corresponding formulas.
+  F substitute_let_bindings(F body, const std::map<std::string, F>& let_bindings) {
+    if (let_bindings.empty()) {
+      return body;
+    }
+    // body.map() recursively substitutes the let bindings in the body of the let expression.
+    return body.map(
+      [&let_bindings](const F& leaf, const F&) -> F {
+        // Check if a leaf in the body is a LVar
+        if (leaf.is(F::LV)) {
+          // If it is, further check if it is in the let bindings
+          auto it = let_bindings.find(std::string(leaf.lv().data()));
+          if (it != let_bindings.end()) {
+            // If it is, substitute it with the corresponding formula.
+            return it->second;
+          }
+        }
+        // Otherwise, return the original leaf, which means no substitution is needed for this leaf.
+        return leaf;
+      }
+    );
+  }
+
+  F make_let(const SV& sv) {
+    if (sv.empty()) {
+      return make_error(sv, "Empty `let` expression.");
+    }
+
+    std::map<std::string, F> used_bindings;
+    for (size_t i = 0; i < sv.size() - 1; ++i) {
+      auto let_binding = std::any_cast<LetBinding>(sv[i]);
+      // Check for duplicate bindings.
+      if (used_bindings.contains(let_binding.first)) {
+        return make_error(sv, "Duplicate `let` binding `" + let_binding.first + "`.");
+      }
+      used_bindings.emplace(std::move(let_binding.first), std::move(let_binding.second));
+    }
+    // The last element of `sv` is the body of the let expression, where the let bindings should be substituted.
+    // substitute_let_bindings() performs the substitution and returns the resulting formula.
+    return substitute_let_bindings(f(sv[sv.size() - 1]), used_bindings);
   }
 
   F make_arith(const SV& sv) {
