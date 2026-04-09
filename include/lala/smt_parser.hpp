@@ -6,6 +6,7 @@
 #include "peglib.h"
 #include <any>
 #include <cassert>
+// #include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
@@ -13,7 +14,9 @@
 #include <iterator>
 #include <map>
 #include <string>
+#include <system_error>
 
+#include "battery/shared_ptr.hpp"
 #include "lala/logic/ast.hpp"
 #include "flatzinc_parser.hpp"
 
@@ -28,7 +31,6 @@ class SMTParser {
   using SV = peg::SemanticValues;
   using So = Sort<allocator_type>;
   using FSeq = typename F::Sequence;
-  using LetBinding = std::pair<std::string, F>;
 
   std::map<std::string, So> declared_symbols; // Symbol name -> sort.
   bool error;   // If an error was found during parsing.
@@ -38,42 +40,50 @@ class SMTParser {
   SMTParser() : error(false), silent(false) {}
 
   F parse(const std::string& input) {
+    // const auto parse_start = std::chrono::steady_clock::now();
+    // const auto report_elapsed = [&parse_start]() {
+    //   const auto elapsed = std::chrono::duration<double>(
+    //     std::chrono::steady_clock::now() - parse_start);
+    //   std::cerr << "SMTParser::parse() took " << elapsed.count() << " s" << std::endl;
+    // };
 			peg::parser parser(R"(
 				Statements    <- (DeclareVar / DeclareFun / Assertion / Comment)+
 
+        Literal       <- Real / Boolean / Integer
 				Integer       <- < [+-]?[0-9]+ >
 				Real          <- < ('inf' / '-inf' /
 														[+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
 														([Ee][+-]?[0-9]+)) ) >
+        Boolean       <- < 'true' / 'false' >
 				Identifier    <- < [a-zA-Z_?][a-zA-Z0-9_?.-]* >
 
 				BinaryOp      <- < '<=' / '>=' / '=' / '>' / '<' >
-				LogicOp       <- < 'and' / 'or' / 'not' >
+				LogicOp       <- < 'and' / 'or' / 'not' / '=>' >
 				ArithOp       <- < '+' / '-' / '*' / '/' >
 				VarType       <- < 'Real' / 'Bool' / 'Int' >
 
-				Term          <- Neg / Arith / Real / Integer / Identifier
-				Neg           <- '(' '-' Term ')'
-				Arith         <- '(' ArithOp Term Term ')'
+				Term          <- Arith / Literal / Identifier
+				Arith         <- '(' ArithOp Term+ ')'
 
 				DeclareVar    <- '(' 'declare-const' Identifier VarType ')'
 				DeclareFun    <- '(' 'declare-fun' Identifier '(' ')' VarType ')'
         
-        Let           <- '(' 'let' '(' LetBinding+ ')' Formula ')'
-        LetBinding    <- '(' Identifier Formula ')'
+        Let           <- '(' 'let' '(' ('(' Identifier Formula ')')+ ')' Formula ')'
         Formula       <- Let / Bound / Constraint / Term
         Bound         <- '(' BinaryOp Term Term ')'
         Constraint    <- '(' LogicOp Formula+ ')'
         Assertion     <- '(' 'assert' Formula ')'
 
-				~Comment       <- ';' [^\n\r]* [ \n\r\t]*
+				~Comment      <- ';' [^\n\r]* [ \n\r\t]*
 				%whitespace   <- [ \n\r\t]*
 			)");
     assert(static_cast<bool>(parser) == true);
 
     parser["Statements"] = [this](const SV& sv) { return make_statements(sv); };
+    parser["Literal"] = [](const SV& sv) { return f(sv[0]); };
     parser["Integer"] = [](const SV& sv) { return F::make_z(sv.token_to_number<logic_int>()); };
     parser["Real"] = [](const SV& sv) { return F::make_real(impl::string_to_real(sv.token_to_string())); };
+    parser["Boolean"] = [](const SV& sv) { return sv.token_to_string() == "true" ? F::make_true() : F::make_false(); };
     parser["Identifier"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["BinaryOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
@@ -82,9 +92,7 @@ class SMTParser {
     parser["DeclareVar"] = [this](const SV& sv) { return make_variable_decl(sv); };
     parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
     parser["Term"] = [this](const SV& sv) { return make_term(sv[0]); };
-    parser["LetBinding"] = [this](const SV& sv) { return make_let_binding(sv); };
     parser["Let"] = [this](const SV& sv) { return make_let(sv); };
-    parser["Neg"] = [this](const SV& sv) { return make_neg(sv); };
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
     parser["Formula"] = [this](const SV& sv) { return f(sv[0]); };
@@ -93,9 +101,11 @@ class SMTParser {
 
     F smt_formulas;
     if (parser.parse(input.c_str(), smt_formulas) && !error) {
+      // report_elapsed();
       return smt_formulas; 
     } 
     else {
+      // report_elapsed();
       std::cerr << "SMT parsing is failed." << std::endl;
       return F::make_false();
     }
@@ -162,14 +172,6 @@ class SMTParser {
     }
   }
 
-  // Construct a let binding pair
-  LetBinding make_let_binding(const SV& sv) {
-    auto name = std::any_cast<std::string>(sv[0]);
-    // First element is the name of the variable to be replaced in the body of the let expression,
-    // and the second element is the formula to be bound to that variable.
-    return LetBinding(std::move(name), f(sv[1]));
-  }
-
   // Substitute the let bindings in the body of the let expression with the corresponding formulas.
   F substitute_let_bindings(F body, const std::map<std::string, F>& let_bindings) {
     if (let_bindings.empty()) {
@@ -194,18 +196,27 @@ class SMTParser {
   }
 
   F make_let(const SV& sv) {
-    if (sv.empty()) {
-      return make_error(sv, "Empty `let` expression.");
+    // Expected semantic values:
+    // [Identifier, Formula, Identifier, Formula, ..., Formula(body)].
+    // Therefore, `sv` size must be odd and at least 3 (one binding + one body).
+    if (sv.size() < 3 || (sv.size() % 2) == 0) {
+      return make_error(sv, "Malformed `let` expression.");
     }
 
     std::map<std::string, F> used_bindings;
-    for (size_t i = 0; i < sv.size() - 1; ++i) {
-      auto let_binding = std::any_cast<LetBinding>(sv[i]);
-      // Check for duplicate bindings.
-      if (used_bindings.contains(let_binding.first)) {
-        return make_error(sv, "Duplicate `let` binding `" + let_binding.first + "`.");
+    for (size_t i = 0; i < sv.size() - 1; i += 2) {
+      std::string name;
+      // Expected sv[i] is an identifier, which is the name of the let binding.
+      try {
+        name = std::any_cast<std::string>(sv[i]);
+      } catch (const std::bad_any_cast&) { // If it is not, report an error.
+        return make_error(sv, "Malformed `let` binding name.");
       }
-      used_bindings.emplace(std::move(let_binding.first), std::move(let_binding.second));
+      // Check for duplicate bindings.
+      if (used_bindings.contains(name)) {
+        return make_error(sv, "Duplicate `let` binding `" + name + "`.");
+      }
+      used_bindings.emplace(std::move(name), f(sv[i + 1]));
     }
     // The last element of `sv` is the body of the let expression, where the let bindings should be substituted.
     // substitute_let_bindings() performs the substitution and returns the resulting formula.
@@ -214,19 +225,41 @@ class SMTParser {
 
   F make_arith(const SV& sv) {
     auto arith_operator = std::any_cast<std::string>(sv[0]);
-    Sig sig;
-    if(arith_operator == "+") sig = ADD;
-    else if(arith_operator == "-") sig = SUB;
-    else if(arith_operator == "*") sig = MUL;
-    else {
-      assert(arith_operator == "/");
-      sig = DIV;
+    if (arith_operator == "/") {
+      if (sv.size() != 3) {
+        return make_error(sv, "Arithmetic operator `" + arith_operator + "` expects exactly two arguments.");
+      }
+      return F::make_binary(f(sv[1]), DIV, f(sv[2]));
     }
-    return F::make_binary(f(sv[1]), sig, f(sv[2]));
-  }
 
-  F make_neg(const SV& sv) {
-    return F::make_unary(NEG, f(sv[0]));
+    FSeq seq;
+    for (size_t i = 1; i < sv.size(); ++i) {
+      seq.push_back(f(sv[i]));
+    }
+
+    if (arith_operator == "+") {
+      if (seq.size() < 2) {
+        return make_error(sv, "Arithmetic operator `+` expects at least two arguments.");
+      }
+      return F::make_nary(ADD, std::move(seq));
+    } else if (arith_operator == "*") {
+      if (seq.size() < 2) {
+        return make_error(sv, "Arithmetic operator `*` expects at least two arguments.");
+      }
+      return F::make_nary(MUL, std::move(seq));
+    } else if (arith_operator == "-") {
+      if (seq.size() == 1) {
+        return F::make_unary(NEG, std::move(seq[0]));
+      }
+      // Subtraction is left-associative and SMT allows n-ary syntax for left-associative op
+      // (- a b c) == ((a - b) - c)
+      F subtraction = std::move(seq[0]);
+      for (size_t i = 1; i < seq.size(); ++i) {
+        subtraction = F::make_binary(std::move(subtraction), SUB, std::move(seq[i]));
+      }
+      return subtraction;
+    }
+    return make_error(sv, "Unsupported arithmetic operator: `" + arith_operator + "`.");
   }
 
   F make_bound(const SV& sv) {
@@ -255,6 +288,17 @@ class SMTParser {
       return F::make_nary(AND, std::move(seq));
     } else if (logic_operator == "or") {
       return F::make_nary(OR, std::move(seq));
+    } else if (logic_operator == "=>") {
+      // Implication is right-associative and SMT allows n-ary syntax for right-associative op
+      // (=> a b c) == (=> a (=> b c))
+      if (seq.size() < 2) {
+        return make_error(sv, "`=>` expects at least two arguments.");
+      }
+      F implication = std::move(seq[seq.size() - 1]);
+      for (int i = seq.size() - 2; i >= 0; --i) {
+        implication = F::make_binary(std::move(seq[i]), IMPLY, std::move(implication));
+      }
+      return implication;
     } else if (logic_operator == "not") {
       if (seq.size() != 1) {
         return make_error(sv, "`not` expects exactly one argument.");
