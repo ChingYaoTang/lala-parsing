@@ -54,27 +54,36 @@ class SMTParser {
 				Real          <- < ('inf' / '-inf' /
 														[+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
 														([Ee][+-]?[0-9]+)) ) >
-        Boolean       <- < 'true' / 'false' >
-				Identifier    <- < [a-zA-Z_?][a-zA-Z0-9_?.-]* >
+	      Boolean       <- < 'true' / 'false' >
+				Identifier    <- QuotedIdentifier / SimpleIdentifier
+				SimpleIdentifier <- < [a-zA-Z_?~!@$%^&*+=<>./#-][a-zA-Z0-9_?~!@$%^&*+=<>./#-]* >
+				QuotedIdentifier <- < '|' (!'|' .)* '|' >
 
-				BinaryOp      <- < '<=' / '>=' / '=' / '>' / '<' >
-				LogicOp       <- < 'and' / 'or' / 'not' / '=>' >
+        BinaryOp      <- < '<=' / '>=' / ('=' !'>') / '>' / '<' >
+				LogicOp       <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
 				ArithOp       <- < '+' / '-' / '*' / '/' >
 				VarType       <- < 'Real' / 'Bool' / 'Int' >
 
-				Term          <- Arith / Literal / Identifier
+				Term          <- Ite / Arith / Literal / Identifier
 				Arith         <- '(' ArithOp Term+ ')'
+				Ite           <- '(' 'ite' Formula Formula Formula ')'
 
 				DeclareVar    <- '(' 'declare-const' Identifier VarType ')'
 				DeclareFun    <- '(' 'declare-fun' Identifier '(' ')' VarType ')'
         
         Let           <- '(' 'let' '(' ('(' Identifier Formula ')')+ ')' Formula ')'
-        Formula       <- Let / Bound / Constraint / Term
-        Bound         <- '(' BinaryOp Term Term ')'
+        Formula       <- Let / Constraint / Bound / Term
+        Bound         <- '(' BinaryOp Formula Formula ')'
         Constraint    <- '(' LogicOp Formula+ ')'
         Assertion     <- '(' 'assert' Formula ')'
 
-				~Comment      <- ';' [^\n\r]* [ \n\r\t]*
+				IgnoredAtom   <- < [^() \n\r\t]+ >
+				IgnoredQuoted <- '"' ( '""' / !'"' . )* '"'
+				IgnoredBar    <- '|' (!'|' .)* '|'
+				IgnoredSExpr  <- IgnoredQuoted / IgnoredBar / IgnoredAtom / '(' IgnoredSExpr* ')'
+				IgnoredCmd    <- '(' ('set-info' / 'set-logic' / 'check-sat' / 'exit') IgnoredSExpr* ')'
+
+				~Comment      <- ';' [^\n\r]* [ \n\r\t]* / IgnoredCmd
 				%whitespace   <- [ \n\r\t]*
 			)");
     assert(static_cast<bool>(parser) == true);
@@ -89,10 +98,11 @@ class SMTParser {
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["ArithOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["VarType"] = [](const SV& sv) { return sv.token_to_string(); };
-    parser["DeclareVar"] = [this](const SV& sv) { return make_variable_decl(sv); };
-    parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
+	  parser["DeclareVar"] = [this](const SV& sv) { return make_variable_decl(sv); };
+	  parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
     parser["Term"] = [this](const SV& sv) { return make_term(sv[0]); };
     parser["Let"] = [this](const SV& sv) { return make_let(sv); };
+    parser["Ite"] = [this](const SV& sv) { return make_ite(sv); };
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
     parser["Formula"] = [this](const SV& sv) { return f(sv[0]); };
@@ -223,13 +233,39 @@ class SMTParser {
     return substitute_let_bindings(f(sv[sv.size() - 1]), used_bindings);
   }
 
+  F make_ite(const SV& sv) {
+    FSeq seq;
+    seq.push_back(f(sv[0]));
+    seq.push_back(f(sv[1]));
+    seq.push_back(f(sv[2]));
+    return F::make_nary(ITE, std::move(seq));
+  }
+
   F make_arith(const SV& sv) {
     auto arith_operator = std::any_cast<std::string>(sv[0]);
-    if (arith_operator == "/") {
+
+    Sig sig;
+    if (arith_operator == "+") {
+      sig = ADD;
+    } else if (arith_operator == "-") {
+      // Negative is represented as a unary operator in AST.
+      if (sv.size() == 2) {
+        return F::make_unary(NEG, f(sv[1]));
+      }
+      sig = SUB;
+    } else if (arith_operator == "*") {
+      sig = MUL;
+    } else if (arith_operator == "/") {
       if (sv.size() != 3) {
-        return make_error(sv, "Arithmetic operator `" + arith_operator + "` expects exactly two arguments.");
+        return make_error(sv, "`/` expects exactly two operands.");
       }
       return F::make_binary(f(sv[1]), DIV, f(sv[2]));
+    } else {
+      return make_error(sv, "Unsupported arithmetic operator: `" + arith_operator + "`.");
+    }
+
+    if (sv.size() < 3) {
+      return make_error(sv, "`" + arith_operator + "` expects at least two operands.");
     }
 
     FSeq seq;
@@ -237,29 +273,16 @@ class SMTParser {
       seq.push_back(f(sv[i]));
     }
 
-    if (arith_operator == "+") {
-      if (seq.size() < 2) {
-        return make_error(sv, "Arithmetic operator `+` expects at least two arguments.");
-      }
-      return F::make_nary(ADD, std::move(seq));
-    } else if (arith_operator == "*") {
-      if (seq.size() < 2) {
-        return make_error(sv, "Arithmetic operator `*` expects at least two arguments.");
-      }
-      return F::make_nary(MUL, std::move(seq));
-    } else if (arith_operator == "-") {
-      if (seq.size() == 1) {
-        return F::make_unary(NEG, std::move(seq[0]));
-      }
-      // Subtraction is left-associative and SMT allows n-ary syntax for left-associative op
-      // (- a b c) == ((a - b) - c)
-      F subtraction = std::move(seq[0]);
-      for (size_t i = 1; i < seq.size(); ++i) {
-        subtraction = F::make_binary(std::move(subtraction), SUB, std::move(seq[i]));
-      }
-      return subtraction;
-    }
-    return make_error(sv, "Unsupported arithmetic operator: `" + arith_operator + "`.");
+    // if (sig == SUB) {
+    //   // Subtraction is left-associative and SMT allows n-ary syntax for left-associative op
+    //   // (- a b c) == ((a - b) - c)
+    //   F subtraction = std::move(seq[0]);
+    //   for (size_t i = 1; i < seq.size(); ++i) {
+    //     subtraction = F::make_binary(std::move(subtraction), sig, std::move(seq[i]));
+    //   }
+    //   return subtraction;
+    // }
+    return F::make_nary(sig, std::move(seq));
   }
 
   F make_bound(const SV& sv) {
@@ -279,34 +302,53 @@ class SMTParser {
 
   F make_constraint(const SV& sv) {
     auto logic_operator = std::any_cast<std::string>(sv[0]);
+
+    Sig sig;
+    if (logic_operator == "not") {
+      if (sv.size() != 2) {
+        return make_error(sv, "`not` expects exactly one argument.");
+      }
+      return F::make_unary(NOT, f(sv[1]));
+    } else if (logic_operator == "and") {
+      sig = AND;
+    } else if (logic_operator == "or") {
+      sig = OR;
+    } else if (logic_operator == "xor") {
+      sig = XOR;
+    } else if (logic_operator == "=>") {
+      sig = IMPLY;
+    } else {
+      return make_error(sv, "Unsupported logical operator `" + logic_operator + "`.");
+    }
+
+    if (sv.size() < 3) {
+      return make_error(sv, "`" + logic_operator + "` expects at least two operands.");
+    }
+
     FSeq seq;
-    for (int i = 1; i < sv.size(); ++i) {
+    for (size_t i = 1; i < sv.size(); ++i) {
       seq.push_back(f(sv[i]));
     }
 
-    if (logic_operator == "and") {
-      return F::make_nary(AND, std::move(seq));
-    } else if (logic_operator == "or") {
-      return F::make_nary(OR, std::move(seq));
-    } else if (logic_operator == "=>") {
+    // if (sig == XOR) {
+    //   // XOR is left-associative in SMT-LIB.
+    //   // (xor a b c) == (xor (xor a b) c)
+    //   F xor_formula = std::move(seq[0]);
+    //   for (size_t i = 1; i < seq.size(); ++i) {
+    //     xor_formula = F::make_binary(std::move(xor_formula), XOR, std::move(seq[i]));
+    //   }
+    //   return xor_formula;
+    // }
+    if (sig == IMPLY) {
       // Implication is right-associative and SMT allows n-ary syntax for right-associative op
       // (=> a b c) == (=> a (=> b c))
-      if (seq.size() < 2) {
-        return make_error(sv, "`=>` expects at least two arguments.");
-      }
       F implication = std::move(seq[seq.size() - 1]);
-      for (int i = seq.size() - 2; i >= 0; --i) {
+      for (int i = static_cast<int>(seq.size()) - 2; i >= 0; --i) {
         implication = F::make_binary(std::move(seq[i]), IMPLY, std::move(implication));
       }
       return implication;
-    } else if (logic_operator == "not") {
-      if (seq.size() != 1) {
-        return make_error(sv, "`not` expects exactly one argument.");
-      }
-      return F::make_unary(NOT, std::move(seq[0]));
-    } else {
-      return make_error(sv, "Unsupported logical operator in constraint.");
     }
+    return F::make_nary(sig, std::move(seq));
   }
 
   F make_assertion(const SV& sv) {
