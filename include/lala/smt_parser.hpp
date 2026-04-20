@@ -15,6 +15,7 @@
 #include <map>
 #include <string>
 #include <system_error>
+#include <vector>
 
 #include "battery/shared_ptr.hpp"
 #include "lala/logic/ast.hpp"
@@ -32,7 +33,20 @@ class SMTParser {
   using So = Sort<allocator_type>;
   using FSeq = typename F::Sequence;
 
+  struct FormalParam {
+    std::string name;
+    So sort;
+  };
+
+  struct DefinedFunction {
+    std::vector<FormalParam> params;
+    So return_sort;
+    F body;
+  };
+
   std::map<std::string, So> declared_symbols; // Symbol name -> sort.
+  std::map<std::string, DefinedFunction> defined_functions; // Function name -> signature and body.
+  std::map<std::string, So> active_function_parameters; // Parameters currently in scope while parsing a function body.
   bool error;   // If an error was found during parsing.
   bool silent;  // If we do not want to output error messages.
 
@@ -47,7 +61,7 @@ class SMTParser {
     //   std::cerr << "SMTParser::parse() took " << elapsed.count() << " s" << std::endl;
     // };
 			peg::parser parser(R"(
-				Statements    <- (DeclareVar / DeclareFun / Assertion / Comment)+
+				Statements    <- (DeclareVar / DeclareFun / DefineFun / Assertion / Comment)+
 
         Literal       <- Real / Boolean / Integer
 				Integer       <- < [+-]?[0-9]+ >
@@ -63,13 +77,16 @@ class SMTParser {
 				LogicOp       <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
 				ArithOp       <- < '+' / '-' / '*' / '/' >
 				VarType       <- < 'Real' / 'Bool' / 'Int' >
+        SortedVarList <- '(' ( '(' Identifier VarType ')' )* ')'
 
-				Term          <- Ite / Arith / Literal / Identifier
+				Term          <- Ite / Arith / Literal / ApplyFun / Identifier
 				Arith         <- '(' ArithOp Term+ ')'
 				Ite           <- '(' 'ite' Formula Formula Formula ')'
+        ApplyFun      <- '(' Identifier Formula+ ')'
 
 				DeclareVar    <- '(' 'declare-const' Identifier VarType ')'
 				DeclareFun    <- '(' 'declare-fun' Identifier '(' ')' VarType ')'
+        DefineFun     <- '(' 'define-fun' Identifier SortedVarList VarType Formula ')'
         
         Let           <- '(' 'let' '(' ('(' Identifier Formula ')')+ ')' Formula ')'
         Formula       <- Let / Constraint / Bound / Term
@@ -93,17 +110,22 @@ class SMTParser {
     parser["Integer"] = [](const SV& sv) { return F::make_z(sv.token_to_number<logic_int>()); };
     parser["Real"] = [](const SV& sv) { return F::make_real(impl::string_to_real(sv.token_to_string())); };
     parser["Boolean"] = [](const SV& sv) { return sv.token_to_string() == "true" ? F::make_true() : F::make_false(); };
-    parser["Identifier"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["SimpleIdentifier"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["QuotedIdentifier"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["Identifier"] = [](const SV& sv) { return std::any_cast<std::string>(sv[0]); };
     parser["BinaryOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["ArithOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["VarType"] = [](const SV& sv) { return sv.token_to_string(); };
 	  parser["DeclareVar"] = [this](const SV& sv) { return make_variable_decl(sv); };
 	  parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
-    parser["Term"] = [this](const SV& sv) { return make_term(sv[0]); };
+    parser["SortedVarList"] = [this](const SV& sv) { return make_sorted_var_list(sv); };
+    parser["DefineFun"] = [this](const SV& sv) { return make_define_fun(sv); };
+    parser["Term"] = [this](const SV& sv) { return make_term(sv); };
     parser["Let"] = [this](const SV& sv) { return make_let(sv); };
     parser["Ite"] = [this](const SV& sv) { return make_ite(sv); };
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
+    parser["ApplyFun"] = [this](const SV& sv) { return make_apply_fun(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
     parser["Formula"] = [this](const SV& sv) { return f(sv[0]); };
     parser["Constraint"] = [this](const SV& sv) { return make_constraint(sv); };
@@ -134,6 +156,17 @@ class SMTParser {
     return F::make_false();
   }
 
+  So get_sort_type(const std::string& type_name) const {
+    if (type_name == "Int") {
+      return So(So::Int);
+    }
+    if (type_name == "Real") {
+      return So(So::Real);
+    }
+    assert(type_name == "Bool");
+    return So(So::Bool);
+  }
+
   F make_statements(const SV& sv) {
     if (sv.size() == 1) {
       return f(sv[0]);
@@ -154,47 +187,97 @@ class SMTParser {
     // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp 
     // for the implementation of variable declaration.
     auto name = std::any_cast<std::string>(sv[0]);
-    if (declared_symbols.contains(name)) {
-      return make_error(sv, "Variable `" + name + "` already declared.");
+    if (declared_symbols.contains(name) || defined_functions.contains(name)) {
+      return make_error(sv, "Symbol `" + name + "` already declared.");
     }
 
     auto type_name = std::any_cast<std::string>(sv[1]);
-    So var_type(So::Real);
-    if (type_name == "Int") var_type = So::Int;
-    else if (type_name == "Real") var_type = So::Real;
-    else if (type_name == "Bool") var_type = So::Bool;
-    else {
-      return make_error(sv, "Unsupported variable type: `" + type_name + "`.");
-    }
+    So var_type = get_sort_type(type_name);
     
     declared_symbols.emplace(name, var_type);
     return F::make_exists(UNTYPED, LVar<allocator_type>(name.data()), std::move(var_type));
   }
 
-  F make_term(const std::any& any) {
+  std::vector<FormalParam> make_sorted_var_list(const SV& sv) {
+    std::vector<FormalParam> params;
+    active_function_parameters.clear();
+
+    for (size_t i = 0; i < sv.size(); i += 2) {
+      auto name = std::any_cast<std::string>(sv[i]);
+      auto type_name = std::any_cast<std::string>(sv[i + 1]);
+
+      if (active_function_parameters.contains(name)) {
+        make_error(sv, "Duplicate function parameter `" + name + "`.");
+        return {};
+      }
+
+      So sort_type = get_sort_type(type_name);
+      active_function_parameters.emplace(name, sort_type);
+      params.push_back(FormalParam{
+        std::move(name),
+        std::move(sort_type)
+      });
+    }
+    return params;
+  }
+
+  F make_define_fun(const SV& sv) {
+    auto name = std::any_cast<std::string>(sv[0]);
+    auto params = std::any_cast<std::vector<FormalParam>>(sv[1]);
+    auto return_sort = get_sort_type(std::any_cast<std::string>(sv[2]));
+    F body = f(sv[3]);
+
+    // The parameter scope is only needed while parsing the body.
+    active_function_parameters.clear();
+
+    if (declared_symbols.contains(name) || defined_functions.contains(name)) {
+      return make_error(sv, "Symbol `" + name + "` already declared.");
+    }
+
+    defined_functions.emplace(name, DefinedFunction{
+      std::move(params),
+      std::move(return_sort),
+      std::move(body)
+    });
+    return F::make_true();
+  }
+
+  F make_term(const SV& sv) {
     try {
-      return f(any);
+      return f(sv[0]);
     } catch (const std::bad_any_cast&) {
       // For current implementation, if the term is not an F, 
       // it should be an identifier, which is treated as a logical variable.
-      auto name = std::any_cast<std::string>(any);
-      return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
+      auto name = std::any_cast<std::string>(sv[0]);
+
+      if (active_function_parameters.contains(name)) {
+        return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
+      }
+
+      auto fun_it = defined_functions.find(name);
+      if (fun_it == defined_functions.end()) {
+        return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
+      }
+      if (!fun_it->second.params.empty()) {
+        return make_error(sv, "Function `" + name + "` expects arguments.");
+      }
+      return fun_it->second.body;
     }
   }
 
-  // Substitute the let bindings in the body of the let expression with the corresponding formulas.
-  F substitute_let_bindings(F body, const std::map<std::string, F>& let_bindings) {
-    if (let_bindings.empty()) {
+  // Substitute a map of symbolic bindings inside a formula body.
+  F substitute_bindings(F body, const std::map<std::string, F>& bindings) {
+    if (bindings.empty()) {
       return body;
     }
-    // body.map() recursively substitutes the let bindings in the body of the let expression.
+    // body.map() recursively substitutes logical-variable leaves.
     return body.map(
-      [&let_bindings](const F& leaf, const F&) -> F {
+      [&bindings](const F& leaf, const F&) -> F {
         // Check if a leaf in the body is a LVar
         if (leaf.is(F::LV)) {
-          // If it is, further check if it is in the let bindings
-          auto it = let_bindings.find(std::string(leaf.lv().data()));
-          if (it != let_bindings.end()) {
+          // If it is, further check if it is in the binding table.
+          auto it = bindings.find(std::string(leaf.lv().data()));
+          if (it != bindings.end()) {
             // If it is, substitute it with the corresponding formula.
             return it->second;
           }
@@ -203,6 +286,30 @@ class SMTParser {
         return leaf;
       }
     );
+  }
+
+  F make_apply_fun(const SV& sv) {
+    auto callee = std::any_cast<std::string>(sv[0]);
+    auto fun_it = defined_functions.find(callee);
+    if (fun_it == defined_functions.end()) {
+      return make_error(sv, "Undefined function `" + callee + "`.");
+    }
+
+    const DefinedFunction& fun = fun_it->second;
+    const size_t actual_arity = sv.size() - 1;
+    if (actual_arity != fun.params.size()) {
+      return make_error(
+        sv,
+        "Function `" + callee + "` expects " + std::to_string(fun.params.size()) +
+        " arguments but got " + std::to_string(actual_arity) + "."
+      );
+    }
+
+    std::map<std::string, F> bindings;
+    for (size_t i = 0; i < fun.params.size(); ++i) {
+      bindings.emplace(fun.params[i].name, f(sv[i + 1]));
+    }
+    return substitute_bindings(fun.body, bindings);
   }
 
   F make_let(const SV& sv) {
@@ -229,8 +336,8 @@ class SMTParser {
       used_bindings.emplace(std::move(name), f(sv[i + 1]));
     }
     // The last element of `sv` is the body of the let expression, where the let bindings should be substituted.
-    // substitute_let_bindings() performs the substitution and returns the resulting formula.
-    return substitute_let_bindings(f(sv[sv.size() - 1]), used_bindings);
+    // substitute_bindings() performs the substitution and returns the resulting formula.
+    return substitute_bindings(f(sv[sv.size() - 1]), used_bindings);
   }
 
   F make_ite(const SV& sv) {
