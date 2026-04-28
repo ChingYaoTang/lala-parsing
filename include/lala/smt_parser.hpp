@@ -69,13 +69,15 @@ class SMTParser {
 														[+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
 														([Ee][+-]?[0-9]+)) ) >
 	      Boolean       <- < 'true' / 'false' >
+
 				Identifier    <- QuotedIdentifier / SimpleIdentifier
 				SimpleIdentifier <- < [a-zA-Z_?~!@$%^&*+=<>./#-][a-zA-Z0-9_?~!@$%^&*+=<>./#-]* >
 				QuotedIdentifier <- < '|' (!'|' .)* '|' >
 
-        BinaryOp      <- < '<=' / '>=' / ('=' !'>') / '>' / '<' >
+        BinaryOp      <- < '<=' / '>=' / '=' / '>' / '<' >
 				LogicOp       <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
 				ArithOp       <- < '+' / '-' / '*' / '/' >
+
 				VarType       <- < 'Real' / 'Bool' / 'Int' >
         SortedVarList <- '(' ( '(' Identifier VarType ')' )* ')'
 
@@ -186,12 +188,16 @@ class SMTParser {
   F make_variable_decl(const SV& sv) { 
     // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp 
     // for the implementation of variable declaration.
+
+    // Expected semantic values: [Identifier, VarType].
     auto name = std::any_cast<std::string>(sv[0]);
+    // Check if the variable name is already used by a declared symbol or a defined function.
     if (declared_symbols.contains(name) || defined_functions.contains(name)) {
       return make_error(sv, "Symbol `" + name + "` already declared.");
     }
 
     auto type_name = std::any_cast<std::string>(sv[1]);
+    // Get the corresponding sort type object
     So var_type = get_sort_type(type_name);
     
     declared_symbols.emplace(name, var_type);
@@ -250,11 +256,13 @@ class SMTParser {
       // it should be an identifier, which is treated as a logical variable.
       auto name = std::any_cast<std::string>(sv[0]);
 
+      // For function parameters
       if (active_function_parameters.contains(name)) {
         return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
       }
 
       auto fun_it = defined_functions.find(name);
+      // For simple identifier term
       if (fun_it == defined_functions.end()) {
         return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
       }
@@ -270,22 +278,19 @@ class SMTParser {
     if (bindings.empty()) {
       return body;
     }
-    // body.map() recursively substitutes logical-variable leaves.
-    return body.map(
-      [&bindings](const F& leaf, const F&) -> F {
-        // Check if a leaf in the body is a LVar
+    // Modify body in-place: body is owned by this function (taken by value),
+    // so no full copy is needed. inplace_map visits only leaf nodes.
+    body.inplace_map(
+      [&bindings](F& leaf, const F&) {
         if (leaf.is(F::LV)) {
-          // If it is, further check if it is in the binding table.
           auto it = bindings.find(std::string(leaf.lv().data()));
           if (it != bindings.end()) {
-            // If it is, substitute it with the corresponding formula.
-            return it->second;
+            leaf = it->second;
           }
         }
-        // Otherwise, return the original leaf, which means no substitution is needed for this leaf.
-        return leaf;
       }
     );
+    return body;
   }
 
   F make_apply_fun(const SV& sv) {
@@ -315,24 +320,26 @@ class SMTParser {
   F make_let(const SV& sv) {
     // Expected semantic values:
     // [Identifier, Formula, Identifier, Formula, ..., Formula(body)].
-    // Therefore, `sv` size must be odd and at least 3 (one binding + one body).
+    // One binding is (Identifier, Formula pair).
+    // Therefore, `sv` size must be odd and at least size 3 (one binding + one body).
     if (sv.size() < 3 || (sv.size() % 2) == 0) {
-      return make_error(sv, "Malformed `let` expression.");
+      return make_error(sv, "Incorrect `let` expression.");
     }
 
     std::map<std::string, F> used_bindings;
     for (size_t i = 0; i < sv.size() - 1; i += 2) {
       std::string name;
-      // Expected sv[i] is an identifier, which is the name of the let binding.
+      // Expected sv[i] is an identifier, which is the name of the binding.
       try {
         name = std::any_cast<std::string>(sv[i]);
       } catch (const std::bad_any_cast&) { // If it is not, report an error.
-        return make_error(sv, "Malformed `let` binding name.");
+        return make_error(sv, "Incorrect `let` binding name.");
       }
       // Check for duplicate bindings.
       if (used_bindings.contains(name)) {
         return make_error(sv, "Duplicate `let` binding `" + name + "`.");
       }
+      // Put the binding into the map
       used_bindings.emplace(std::move(name), f(sv[i + 1]));
     }
     // The last element of `sv` is the body of the let expression, where the let bindings should be substituted.
@@ -359,6 +366,8 @@ class SMTParser {
       if (sv.size() == 2) {
         return F::make_unary(NEG, f(sv[1]));
       }
+      // Subtraction is parsed with make_nary instead of explicitly handled in left-associative way with make_binary.
+      // It will be ternarized in left-fold way in ternarize.hpp so that the left-associative property is preserved.
       sig = SUB;
     } else if (arith_operator == "*") {
       sig = MUL;
@@ -367,8 +376,6 @@ class SMTParser {
         return make_error(sv, "`/` expects exactly two operands.");
       }
       return F::make_binary(f(sv[1]), DIV, f(sv[2]));
-    } else {
-      return make_error(sv, "Unsupported arithmetic operator: `" + arith_operator + "`.");
     }
 
     if (sv.size() < 3) {
@@ -380,15 +387,6 @@ class SMTParser {
       seq.push_back(f(sv[i]));
     }
 
-    // if (sig == SUB) {
-    //   // Subtraction is left-associative and SMT allows n-ary syntax for left-associative op
-    //   // (- a b c) == ((a - b) - c)
-    //   F subtraction = std::move(seq[0]);
-    //   for (size_t i = 1; i < seq.size(); ++i) {
-    //     subtraction = F::make_binary(std::move(subtraction), sig, std::move(seq[i]));
-    //   }
-    //   return subtraction;
-    // }
     return F::make_nary(sig, std::move(seq));
   }
 
@@ -399,10 +397,7 @@ class SMTParser {
     else if (binary_operator == "<=") sig = LEQ;
     else if (binary_operator == ">=") sig = GEQ;
     else if (binary_operator == ">") sig = GT;
-    else {
-      assert(binary_operator == "<");
-      sig = LT;
-    }
+    else if (binary_operator == "<") sig = LT;
 
     return F::make_binary(f(sv[1]), sig, f(sv[2]));
   }
@@ -423,9 +418,13 @@ class SMTParser {
     } else if (logic_operator == "xor") {
       sig = XOR;
     } else if (logic_operator == "=>") {
-      sig = IMPLY;
-    } else {
-      return make_error(sv, "Unsupported logical operator `" + logic_operator + "`.");
+      // Implication is right-associative and SMT allows n-ary syntax for right-associative op
+      // (=> a b c) == (=> a (=> b c))
+      F implication = f(sv[sv.size() - 1]);
+      for (size_t i = sv.size() - 2; i >= 1; --i) {
+        implication = F::make_binary(f(sv[i]), IMPLY, std::move(implication));
+      }
+      return implication;
     }
 
     if (sv.size() < 3) {
@@ -437,24 +436,6 @@ class SMTParser {
       seq.push_back(f(sv[i]));
     }
 
-    // if (sig == XOR) {
-    //   // XOR is left-associative in SMT-LIB.
-    //   // (xor a b c) == (xor (xor a b) c)
-    //   F xor_formula = std::move(seq[0]);
-    //   for (size_t i = 1; i < seq.size(); ++i) {
-    //     xor_formula = F::make_binary(std::move(xor_formula), XOR, std::move(seq[i]));
-    //   }
-    //   return xor_formula;
-    // }
-    if (sig == IMPLY) {
-      // Implication is right-associative and SMT allows n-ary syntax for right-associative op
-      // (=> a b c) == (=> a (=> b c))
-      F implication = std::move(seq[seq.size() - 1]);
-      for (int i = static_cast<int>(seq.size()) - 2; i >= 0; --i) {
-        implication = F::make_binary(std::move(seq[i]), IMPLY, std::move(implication));
-      }
-      return implication;
-    }
     return F::make_nary(sig, std::move(seq));
   }
 
