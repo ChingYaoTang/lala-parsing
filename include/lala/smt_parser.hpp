@@ -15,6 +15,7 @@
 #include <map>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "battery/shared_ptr.hpp"
@@ -33,13 +34,8 @@ class SMTParser {
   using So = Sort<allocator_type>;
   using FSeq = typename F::Sequence;
 
-  struct FormalParam {
-    std::string name;
-    So sort;
-  };
-
   struct DefinedFunction {
-    std::vector<FormalParam> params;
+    std::vector<std::pair<std::string, So>> params;
     So return_sort;
     F body;
   };
@@ -71,7 +67,7 @@ class SMTParser {
 	      Boolean       <- < 'true' / 'false' >
 
 				Identifier    <- QuotedIdentifier / SimpleIdentifier
-				SimpleIdentifier <- < [a-zA-Z_?~!@$%^&*+=<>./#-][a-zA-Z0-9_?~!@$%^&*+=<>./#-]* >
+				SimpleIdentifier <- < [a-zA-Z_?~!$%^&*+=<>/-][a-zA-Z0-9_?~!$%^&*+=<>/-@.]* >
 				QuotedIdentifier <- < '|' (!'|' .)* '|' >
 
         BinaryOp      <- < '<=' / '>=' / '=' / '>' / '<' >
@@ -108,13 +104,13 @@ class SMTParser {
     assert(static_cast<bool>(parser) == true);
 
     parser["Statements"] = [this](const SV& sv) { return make_statements(sv); };
-    parser["Literal"] = [](const SV& sv) { return f(sv[0]); };
+    // parser["Literal"] = [](const SV& sv) { return f(sv[0]); };
     parser["Integer"] = [](const SV& sv) { return F::make_z(sv.token_to_number<logic_int>()); };
     parser["Real"] = [](const SV& sv) { return F::make_real(impl::string_to_real(sv.token_to_string())); };
     parser["Boolean"] = [](const SV& sv) { return sv.token_to_string() == "true" ? F::make_true() : F::make_false(); };
     parser["SimpleIdentifier"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["QuotedIdentifier"] = [](const SV& sv) { return sv.token_to_string(); };
-    parser["Identifier"] = [](const SV& sv) { return std::any_cast<std::string>(sv[0]); };
+    // parser["Identifier"] = [](const SV& sv) { return std::any_cast<std::string>(sv[0]); };
     parser["BinaryOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["ArithOp"] = [](const SV& sv) { return sv.token_to_string(); };
@@ -129,7 +125,7 @@ class SMTParser {
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
     parser["ApplyFun"] = [this](const SV& sv) { return make_apply_fun(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
-    parser["Formula"] = [this](const SV& sv) { return f(sv[0]); };
+    // parser["Formula"] = [this](const SV& sv) { return f(sv[0]); };
     parser["Constraint"] = [this](const SV& sv) { return make_constraint(sv); };
     parser["Assertion"] = [this](const SV& sv) { return make_assertion(sv); };
 
@@ -204,43 +200,51 @@ class SMTParser {
     return F::make_exists(UNTYPED, LVar<allocator_type>(name.data()), std::move(var_type));
   }
 
-  std::vector<FormalParam> make_sorted_var_list(const SV& sv) {
-    std::vector<FormalParam> params;
+  std::vector<std::pair<std::string, So>> make_sorted_var_list(const SV& sv) {
+    // Expected semantic values: [Identifier, VarType, Identifier, VarType, ...].
+    // Each adjacent pair describes one function parameter from the SMT sorted-var list.
+    std::vector<std::pair<std::string, So>> params;
     active_function_parameters.clear();
 
     for (size_t i = 0; i < sv.size(); i += 2) {
-      auto name = std::any_cast<std::string>(sv[i]);
+      auto var_name = std::any_cast<std::string>(sv[i]);
       auto type_name = std::any_cast<std::string>(sv[i + 1]);
 
-      if (active_function_parameters.contains(name)) {
-        make_error(sv, "Duplicate function parameter `" + name + "`.");
+      if (active_function_parameters.contains(var_name)) {
+        // SMT-LIB does not explicitly require define-fun parameters to be distinct.
+        // This parser rejects duplicates because its substitution map is keyed by
+        // parameter name and cannot represent shadowed parameters correctly.
+        make_error(sv, "Duplicate function parameter `" + var_name + "`.");
         return {};
       }
 
       So sort_type = get_sort_type(type_name);
-      active_function_parameters.emplace(name, sort_type);
-      params.push_back(FormalParam{
-        std::move(name),
-        std::move(sort_type)
-      });
+      active_function_parameters.emplace(var_name, sort_type);
+      params.emplace_back(std::move(var_name), std::move(sort_type));
     }
     return params;
   }
 
   F make_define_fun(const SV& sv) {
-    auto name = std::any_cast<std::string>(sv[0]);
-    auto params = std::any_cast<std::vector<FormalParam>>(sv[1]);
+    // Expected semantic values:
+    // [Identifier(function name), SortedVarList(params), VarType(return sort), Formula(body)].
+    // The grammar has already parsed the parameter list before the body, so
+    // active_function_parameters was available while the body was being built.
+    auto fun_name = std::any_cast<std::string>(sv[0]);
+    auto params = std::any_cast<std::vector<std::pair<std::string, So>>>(sv[1]);
     auto return_sort = get_sort_type(std::any_cast<std::string>(sv[2]));
     F body = f(sv[3]);
 
     // The parameter scope is only needed while parsing the body.
     active_function_parameters.clear();
 
-    if (declared_symbols.contains(name) || defined_functions.contains(name)) {
-      return make_error(sv, "Symbol `" + name + "` already declared.");
+    if (declared_symbols.contains(fun_name) || defined_functions.contains(fun_name)) {
+      return make_error(sv, "Symbol `" + fun_name + "` already declared.");
     }
 
-    defined_functions.emplace(name, DefinedFunction{
+    // A define-fun command does not add an assertion directly in this parser.
+    // It is stored as a named macro-like definition and expand applications in make_apply_fun().
+    defined_functions.emplace(fun_name, DefinedFunction{
       std::move(params),
       std::move(return_sort),
       std::move(body)
@@ -256,16 +260,18 @@ class SMTParser {
       // it should be an identifier, which is treated as a logical variable.
       auto name = std::any_cast<std::string>(sv[0]);
 
-      // For function parameters
+      // For identifier term in function parameters
       if (active_function_parameters.contains(name)) {
         return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
       }
 
       auto fun_it = defined_functions.find(name);
-      // For simple identifier term
+      // For simple identifier term (not the identifier of a defined function)
       if (fun_it == defined_functions.end()) {
         return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
       }
+      // make_term only handles bare identifiers. A defined function with
+      // parameters must be parsed through ApplyFun, where its arguments are available.
       if (!fun_it->second.params.empty()) {
         return make_error(sv, "Function `" + name + "` expects arguments.");
       }
@@ -279,7 +285,7 @@ class SMTParser {
       return body;
     }
     // Modify body in-place: body is owned by this function (taken by value),
-    // so no full copy is needed. inplace_map visits only leaf nodes.
+    // inplace_map visits only leaf nodes and replaces them directly
     body.inplace_map(
       [&bindings](F& leaf, const F&) {
         if (leaf.is(F::LV)) {
@@ -294,6 +300,7 @@ class SMTParser {
   }
 
   F make_apply_fun(const SV& sv) {
+    // Expected semantic values: [Identifier(function name), Formula(arg1), Formula(arg2), ...].
     auto callee = std::any_cast<std::string>(sv[0]);
     auto fun_it = defined_functions.find(callee);
     if (fun_it == defined_functions.end()) {
@@ -312,7 +319,8 @@ class SMTParser {
 
     std::map<std::string, F> bindings;
     for (size_t i = 0; i < fun.params.size(); ++i) {
-      bindings.emplace(fun.params[i].name, f(sv[i + 1]));
+      // fun.params[i].first is the param name, and sv[i + 1] is the corresponding argument formula.
+      bindings.emplace(fun.params[i].first, f(sv[i + 1]));
     }
     return substitute_bindings(fun.body, bindings);
   }
