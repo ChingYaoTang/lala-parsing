@@ -57,77 +57,76 @@ class SMTParser {
     //   std::cerr << "SMTParser::parse() took " << elapsed.count() << " s" << std::endl;
     // };
 			peg::parser parser(R"(
-				Statements    <- (DeclareVar / DeclareFun / DefineFun / Assertion / Comment)+
+				Statements     <- (DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
 
-        Literal       <- Real / Boolean / Integer
-				Integer       <- < [+-]?[0-9]+ >
-				Real          <- < ('inf' / '-inf' /
+				Integer        <- < [+-]?[0-9]+ >
+				Real           <- < ('inf' / '-inf' /
 														[+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
 														([Ee][+-]?[0-9]+)) ) >
-	      Boolean       <- < 'true' / 'false' >
+	      Boolean        <- < 'true' / 'false' >
+        Literal        <- Real / Boolean / Integer
 
-				Identifier    <- QuotedIdentifier / SimpleIdentifier
-				SimpleIdentifier <- < [a-zA-Z_?~!$%^&*+=<>/-][a-zA-Z0-9_?~!$%^&*+=<>/-@.]* >
-				QuotedIdentifier <- < '|' (!'|' .)* '|' >
+				SimpleSymbol   <- < [a-zA-Z_?~!$%^&*+=<>/-][a-zA-Z0-9_?~!$%^&*+=<>/-@.]* >
+				QuotedSymbol   <- < '|' (!'|' .)* '|' >
+        Symbol         <- QuotedSymbol / SimpleSymbol
+        Identifier     <- Symbol
 
-        BinaryOp      <- < '<=' / '>=' / '=' / '>' / '<' >
-				LogicOp       <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
-				ArithOp       <- < '+' / '-' / '*' / '/' >
+        Sort           <- < 'Real' / 'Bool' / 'Int' >
+        SortedVars     <- '(' ( '(' Symbol Sort ')' )* ')'
 
-				VarType       <- < 'Real' / 'Bool' / 'Int' >
-        SortedVarList <- '(' ( '(' Identifier VarType ')' )* ')'
+        DeclareConst   <- '(' 'declare-const' Symbol Sort ')'
+				DeclareFun     <- '(' 'declare-fun' Symbol '(' ')' Sort ')'
+        DefineFun      <- '(' 'define-fun' Symbol SortedVars Sort Term ')'
 
-				Term          <- Ite / Arith / Literal / ApplyFun / Identifier
-				Arith         <- '(' ArithOp Term+ ')'
-				Ite           <- '(' 'ite' Formula Formula Formula ')'
-        ApplyFun      <- '(' Identifier Formula+ ')'
+        BinaryOp       <- < '<=' / '>=' / '=' / '>' / '<' >
+				LogicOp        <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
+				ArithOp        <- < '+' / '-' / '*' / '/' >
 
-				DeclareVar    <- '(' 'declare-const' Identifier VarType ')'
-				DeclareFun    <- '(' 'declare-fun' Identifier '(' ')' VarType ')'
-        DefineFun     <- '(' 'define-fun' Identifier SortedVarList VarType Formula ')'
-        
-        Let           <- '(' 'let' '(' ('(' Identifier Formula ')')+ ')' Formula ')'
-        Formula       <- Let / Constraint / Bound / Term
-        Bound         <- '(' BinaryOp Formula Formula ')'
-        Constraint    <- '(' LogicOp Formula+ ')'
-        Assertion     <- '(' 'assert' Formula ')'
+				Arith          <- '(' ArithOp Term+ ')'
+				Ite            <- '(' 'ite' Term Term Term ')'
+	      FunApplication <- '(' Symbol Term+ ')' 
+	        
+        Let            <- '(' 'let' '(' ('(' Symbol Term ')')+ ')' Term ')'
+        Distinct       <- '(' 'distinct' Term Term+ ')'
+        Bound          <- '(' BinaryOp Term Term ')'
+        Constraint     <- '(' LogicOp Term+ ')'
+        Term           <- Let / Distinct / Constraint / Bound / Ite / Arith / Literal / FunApplication / Identifier
+        Assertion      <- '(' 'assert' Term ')'
 
-				IgnoredAtom   <- < [^() \n\r\t]+ >
-				IgnoredQuoted <- '"' ( '""' / !'"' . )* '"'
-				IgnoredBar    <- '|' (!'|' .)* '|'
-				IgnoredSExpr  <- IgnoredQuoted / IgnoredBar / IgnoredAtom / '(' IgnoredSExpr* ')'
-				IgnoredCmd    <- '(' ('set-info' / 'set-logic' / 'check-sat' / 'exit') IgnoredSExpr* ')'
+				IgnoredAtom    <- < [^() \n\r\t]+ >
+				IgnoredQuoted  <- '"' ( '""' / !'"' . )* '"'
+				IgnoredBar     <- '|' (!'|' .)* '|'
+				IgnoredSExpr   <- IgnoredQuoted / IgnoredBar / IgnoredAtom / '(' IgnoredSExpr* ')'
+				IgnoredCmd     <- '(' ('set-info' / 'set-logic' / 'check-sat' / 'exit') IgnoredSExpr* ')'
 
-				~Comment      <- ';' [^\n\r]* [ \n\r\t]* / IgnoredCmd
-				%whitespace   <- [ \n\r\t]*
+				~Comment       <- ';' [^\n\r]* [ \n\r\t]* / IgnoredCmd
+				%whitespace    <- [ \n\r\t]*
 			)");
     assert(static_cast<bool>(parser) == true);
 
     parser["Statements"] = [this](const SV& sv) { return make_statements(sv); };
-    // parser["Literal"] = [](const SV& sv) { return f(sv[0]); };
     parser["Integer"] = [](const SV& sv) { return F::make_z(sv.token_to_number<logic_int>()); };
     parser["Real"] = [](const SV& sv) { return F::make_real(impl::string_to_real(sv.token_to_string())); };
     parser["Boolean"] = [](const SV& sv) { return sv.token_to_string() == "true" ? F::make_true() : F::make_false(); };
-    parser["SimpleIdentifier"] = [](const SV& sv) { return sv.token_to_string(); };
-    parser["QuotedIdentifier"] = [](const SV& sv) { return sv.token_to_string(); };
-    // parser["Identifier"] = [](const SV& sv) { return std::any_cast<std::string>(sv[0]); };
+    parser["SimpleSymbol"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["QuotedSymbol"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["Identifier"] = [this](const SV& sv) { return make_identifier(sv); };
     parser["BinaryOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["ArithOp"] = [](const SV& sv) { return sv.token_to_string(); };
-    parser["VarType"] = [](const SV& sv) { return sv.token_to_string(); };
-	  parser["DeclareVar"] = [this](const SV& sv) { return make_variable_decl(sv); };
+    parser["Sort"] = [](const SV& sv) { return sv.token_to_string(); };
+	  parser["DeclareConst"] = [this](const SV& sv) { return make_variable_decl(sv); };
 	  parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
-    parser["SortedVarList"] = [this](const SV& sv) { return make_sorted_var_list(sv); };
-    parser["DefineFun"] = [this](const SV& sv) { return make_define_fun(sv); };
-    parser["Term"] = [this](const SV& sv) { return make_term(sv); };
-    parser["Let"] = [this](const SV& sv) { return make_let(sv); };
+    parser["SortedVars"] = [this](const SV& sv) { return make_sorted_vars(sv); };
+	  parser["DefineFun"] = [this](const SV& sv) { return make_define_fun(sv); };
+	  parser["Let"] = [this](const SV& sv) { return make_let(sv); };
+    parser["Distinct"] = [this](const SV& sv) { return make_distinct(sv); };
     parser["Ite"] = [this](const SV& sv) { return make_ite(sv); };
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
-    parser["ApplyFun"] = [this](const SV& sv) { return make_apply_fun(sv); };
+    parser["FunApplication"] = [this](const SV& sv) { return make_fun_application(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
-    // parser["Formula"] = [this](const SV& sv) { return f(sv[0]); };
     parser["Constraint"] = [this](const SV& sv) { return make_constraint(sv); };
-    parser["Assertion"] = [this](const SV& sv) { return make_assertion(sv); };
+    // parser["Assertion"] = [this](const SV& sv) { return make_assertion(sv); };
 
     F smt_formulas;
     if (parser.parse(input.c_str(), smt_formulas) && !error) {
@@ -154,61 +153,45 @@ class SMTParser {
     return F::make_false();
   }
 
-  So get_sort_type(const std::string& type_name) const {
-    if (type_name == "Int") {
+  So get_sort_type(const std::string& sort_name) const {
+    if (sort_name == "Int") {
       return So(So::Int);
     }
-    if (type_name == "Real") {
+    if (sort_name == "Real") {
       return So(So::Real);
     }
-    assert(type_name == "Bool");
+    assert(sort_name == "Bool");
     return So(So::Bool);
-  }
-
-  F make_statements(const SV& sv) {
-    if (sv.size() == 1) {
-      return f(sv[0]);
-    } 
-    else {
-      FSeq children;
-      for (size_t i = 0; i < sv.size(); ++i) {
-        F formula = f(sv[i]);
-        if (!formula.is_true()) {
-          children.push_back(formula);
-        }
-      }
-      return F::make_nary(AND, std::move(children));
-    }
   }
 
   F make_variable_decl(const SV& sv) { 
     // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp 
     // for the implementation of variable declaration.
 
-    // Expected semantic values: [Identifier, VarType].
+    // Expected semantic values: [Symbol, Sort].
     auto name = std::any_cast<std::string>(sv[0]);
     // Check if the variable name is already used by a declared symbol or a defined function.
     if (declared_symbols.contains(name) || defined_functions.contains(name)) {
       return make_error(sv, "Symbol `" + name + "` already declared.");
     }
 
-    auto type_name = std::any_cast<std::string>(sv[1]);
+    auto sort_name = std::any_cast<std::string>(sv[1]);
     // Get the corresponding sort type object
-    So var_type = get_sort_type(type_name);
+    So var_sort = get_sort_type(sort_name);
     
-    declared_symbols.emplace(name, var_type);
-    return F::make_exists(UNTYPED, LVar<allocator_type>(name.data()), std::move(var_type));
+    declared_symbols.emplace(name, var_sort);
+    return F::make_exists(UNTYPED, LVar<allocator_type>(name.data()), std::move(var_sort));
   }
 
-  std::vector<std::pair<std::string, So>> make_sorted_var_list(const SV& sv) {
-    // Expected semantic values: [Identifier, VarType, Identifier, VarType, ...].
+  std::vector<std::pair<std::string, So>> make_sorted_vars(const SV& sv) {
+    // Expected semantic values: [Symbol, Sort, Symbol, Sort, ...].
     // Each adjacent pair describes one function parameter from the SMT sorted-var list.
     std::vector<std::pair<std::string, So>> params;
     active_function_parameters.clear();
 
     for (size_t i = 0; i < sv.size(); i += 2) {
       auto var_name = std::any_cast<std::string>(sv[i]);
-      auto type_name = std::any_cast<std::string>(sv[i + 1]);
+      auto sort_name = std::any_cast<std::string>(sv[i + 1]);
 
       if (active_function_parameters.contains(var_name)) {
         // SMT-LIB does not explicitly require define-fun parameters to be distinct.
@@ -218,16 +201,16 @@ class SMTParser {
         return {};
       }
 
-      So sort_type = get_sort_type(type_name);
-      active_function_parameters.emplace(var_name, sort_type);
-      params.emplace_back(std::move(var_name), std::move(sort_type));
+      So var_sort = get_sort_type(sort_name);
+      active_function_parameters.emplace(var_name, var_sort);
+      params.emplace_back(std::move(var_name), std::move(var_sort));
     }
     return params;
   }
 
   F make_define_fun(const SV& sv) {
     // Expected semantic values:
-    // [Identifier(function name), SortedVarList(params), VarType(return sort), Formula(body)].
+    // [Symbol(function name), SortedVarList(params), Sort(return sort), Term(body)].
     // The grammar has already parsed the parameter list before the body, so
     // active_function_parameters was available while the body was being built.
     auto fun_name = std::any_cast<std::string>(sv[0]);
@@ -252,31 +235,25 @@ class SMTParser {
     return F::make_true();
   }
 
-  F make_term(const SV& sv) {
-    try {
-      return f(sv[0]);
-    } catch (const std::bad_any_cast&) {
-      // For current implementation, if the term is not an F, 
-      // it should be an identifier, which is treated as a logical variable.
-      auto name = std::any_cast<std::string>(sv[0]);
+  F make_identifier(const SV& sv) {
+    auto name = std::any_cast<std::string>(sv[0]);
 
-      // For identifier term in function parameters
-      if (active_function_parameters.contains(name)) {
-        return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
-      }
-
-      auto fun_it = defined_functions.find(name);
-      // For simple identifier term (not the identifier of a defined function)
-      if (fun_it == defined_functions.end()) {
-        return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
-      }
-      // make_term only handles bare identifiers. A defined function with
-      // parameters must be parsed through ApplyFun, where its arguments are available.
-      if (!fun_it->second.params.empty()) {
-        return make_error(sv, "Function `" + name + "` expects arguments.");
-      }
-      return fun_it->second.body;
+    // Function parameters are scoped only while parsing the function body.
+    if (active_function_parameters.contains(name)) {
+      return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
     }
+
+    auto fun_it = defined_functions.find(name);
+    // A bare symbol that is not a defined function is treated as a logical variable.
+    if (fun_it == defined_functions.end()) {
+      return F::make_lvar(UNTYPED, LVar<allocator_type>(name.data()));
+    }
+    // Identifier only handles bare symbols. A defined function with parameters
+    // must be parsed through FunApplication, where its arguments are available.
+    if (!fun_it->second.params.empty()) {
+      return make_error(sv, "Function `" + name + "` expects arguments.");
+    }
+    return fun_it->second.body;
   }
 
   // Substitute a map of symbolic bindings inside a formula body.
@@ -299,8 +276,8 @@ class SMTParser {
     return body;
   }
 
-  F make_apply_fun(const SV& sv) {
-    // Expected semantic values: [Identifier(function name), Formula(arg1), Formula(arg2), ...].
+  F make_fun_application(const SV& sv) {
+    // Expected semantic values: [Symbol(function name), Term(arg1), Term(arg2), ...].
     auto callee = std::any_cast<std::string>(sv[0]);
     auto fun_it = defined_functions.find(callee);
     if (fun_it == defined_functions.end()) {
@@ -327,8 +304,8 @@ class SMTParser {
 
   F make_let(const SV& sv) {
     // Expected semantic values:
-    // [Identifier, Formula, Identifier, Formula, ..., Formula(body)].
-    // One binding is (Identifier, Formula pair).
+    // [Symbol, Term, Symbol, Term, ..., Term(body)].
+    // One binding is (Symbol, Term pair).
     // Therefore, `sv` size must be odd and at least size 3 (one binding + one body).
     if (sv.size() < 3 || (sv.size() % 2) == 0) {
       return make_error(sv, "Incorrect `let` expression.");
@@ -337,7 +314,7 @@ class SMTParser {
     std::map<std::string, F> used_bindings;
     for (size_t i = 0; i < sv.size() - 1; i += 2) {
       std::string name;
-      // Expected sv[i] is an identifier, which is the name of the binding.
+      // Expected sv[i] is a symbol, which is the name of the binding.
       try {
         name = std::any_cast<std::string>(sv[i]);
       } catch (const std::bad_any_cast&) { // If it is not, report an error.
@@ -363,8 +340,32 @@ class SMTParser {
     return F::make_nary(ITE, std::move(seq));
   }
 
-  F make_arith(const SV& sv) {
-    auto arith_operator = std::any_cast<std::string>(sv[0]);
+  // SMT-LIB n-ary `distinct` means every pair of operands is different.
+  // Turbo's `NEQ` is interpreted as a binary disequality, so n-ary `distinct` must be expanded into an AND of pairwise binary NEQ nodes.
+  F make_distinct(const SV& sv) {
+    // Expected semantic values: [Term1, Term2, ...].
+    if (sv.size() == 2) {
+      return F::make_binary(f(sv[0]), NEQ, f(sv[1]));
+    }
+    
+    // To prevent repeatedly calling f(sv[i]) when building pairwise NEQ nodes, a list of terms for all operands is built first.
+    FSeq seq;
+    for (size_t i = 0; i < sv.size(); ++i) {
+      seq.push_back(f(sv[i]));
+    }
+
+    FSeq pairwise;
+    for (size_t i = 0; i < seq.size(); ++i) {
+      for (size_t j = i + 1; j < seq.size(); ++j) {
+        pairwise.push_back(F::make_binary(seq[i], NEQ, seq[j]));
+      }
+    }
+
+    return F::make_nary(AND, std::move(pairwise));
+  }
+
+	F make_arith(const SV& sv) {
+	  auto arith_operator = std::any_cast<std::string>(sv[0]);
 
     Sig sig;
     if (arith_operator == "+") {
@@ -447,20 +448,38 @@ class SMTParser {
     return F::make_nary(sig, std::move(seq));
   }
 
-  F make_assertion(const SV& sv) {
+  F make_statements(const SV& sv) {
     if (sv.size() == 1) {
       return f(sv[0]);
     } 
     else {
-      FSeq disjuncts;
-      auto logic_operator = std::any_cast<std::string>(sv[0]); // OR
-      for (int i = 1; i < sv.size(); ++i) {
-        disjuncts.push_back(f(sv[i]));
+      FSeq children;
+      for (size_t i = 0; i < sv.size(); ++i) {
+        F formula = f(sv[i]);
+        if (!formula.is_true()) {
+          children.push_back(formula);
+        }
       }
-
-      return F::make_nary(OR, std::move(disjuncts));
+      return F::make_nary(AND, std::move(children));
     }
   }
+
+  // Since ( assert ⟨term⟩ ) is the only way to add assertions in SMT-lib, the else branch will never be used.
+  // we can directly return the assertion formula without checking the size of `sv`.
+  // F make_assertion(const SV& sv) {
+  //   if (sv.size() == 1) {
+  //     return f(sv[0]);
+  //   } 
+  //   else {
+  //     FSeq disjuncts;
+  //     auto logic_operator = std::any_cast<std::string>(sv[0]); // OR
+  //     for (int i = 1; i < sv.size(); ++i) {
+  //       disjuncts.push_back(f(sv[i]));
+  //     }
+
+  //     return F::make_nary(OR, std::move(disjuncts));
+  //   }
+  // }
 };
 }  // namespace impl
 
