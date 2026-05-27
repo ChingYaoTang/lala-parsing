@@ -53,14 +53,14 @@ class SMTParser {
       // const auto parse_start = std::chrono::steady_clock::now();
       // const auto report_elapsed = [&parse_start]() {
       //   const auto elapsed = std::chrono::duration<double>(
-      //     std::chrono::steady_clock::now() - parse_start);
+      //      std::chrono::steady_clock::now() - parse_start);
       //   std::cerr << "SMTParser::parse() took " << elapsed.count() << " s" << std::endl;
       // };
-			peg::parser parser(R"(
+      peg::parser parser(R"(
         Statements     <- (DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
-
-			  Integer        <- < [+-]?[0-9]+ >
-			  Real           <- < ('inf' / '-inf' /
+    		
+        Integer        <- < [+-]?[0-9]+ >
+        Real           <- < ('inf' / '-inf' /
                             [+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
                             ([Ee][+-]?[0-9]+)) ) >
         Boolean        <- < 'true' / 'false' >
@@ -81,7 +81,7 @@ class SMTParser {
         BinaryOp       <- < '<=' / '>=' / '=' / '>' / '<' >
         LogicOp        <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
         ArithOp        <- < '+' / '-' / '*' / '/' >
-        
+
         Arith          <- '(' ArithOp Term+ ')'
         Ite            <- '(' 'ite' Term Term Term ')'
         FunApplication <- '(' Symbol Term+ ')' 
@@ -101,7 +101,7 @@ class SMTParser {
         
         ~Comment       <- ';' [^\n\r]* [ \n\r\t]* / IgnoredCmd
         %whitespace    <- [ \n\r\t]*
-			)");
+      )");
     assert(static_cast<bool>(parser) == true);
 
     parser["Statements"] = [this](const SV& sv) { return make_statements(sv); };
@@ -131,8 +131,8 @@ class SMTParser {
     F smt_formulas;
     if (parser.parse(input.c_str(), smt_formulas) && !error) {
       // report_elapsed();
-      return smt_formulas; 
-    } 
+      return smt_formulas;
+    }
     else {
       // report_elapsed();
       std::cerr << "SMT parsing is failed." << std::endl;
@@ -164,8 +164,8 @@ class SMTParser {
     return So(So::Bool);
   }
 
-  F make_variable_decl(const SV& sv) { 
-    // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp 
+  F make_variable_decl(const SV& sv) {
+    // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp
     // for the implementation of variable declaration.
 
     // Expected semantic values: [Symbol, Sort].
@@ -317,7 +317,7 @@ class SMTParser {
       // Expected sv[i] is a symbol, which is the name of the binding.
       try {
         name = std::any_cast<std::string>(sv[i]);
-      } 
+      }
       catch (const std::bad_any_cast&) { // If it is not, report an error.
         return make_error(sv, "Incorrect `let` binding name.");
       }
@@ -365,13 +365,11 @@ class SMTParser {
     return F::make_nary(AND, std::move(pairwise));
   }
 
-	F make_arith(const SV& sv) {
-	  auto arith_operator = std::any_cast<std::string>(sv[0]);
+  F make_arith(const SV& sv) {
+    auto arith_operator = std::any_cast<std::string>(sv[0]);
 
     Sig sig;
-    if (arith_operator == "+") {
-      sig = ADD;
-    } 
+    if (arith_operator == "+") sig = ADD;
     else if (arith_operator == "-") {
       // Negative is represented as a unary operator in AST.
       if (sv.size() == 2) {
@@ -380,10 +378,8 @@ class SMTParser {
       // Subtraction is parsed with make_nary instead of explicitly handled in left-associative way with make_binary.
       // It will be ternarized in left-fold way in ternarize.hpp so that the left-associative property is preserved.
       sig = SUB;
-    } 
-    else if (arith_operator == "*") {
-      sig = MUL;
-    } 
+    }
+    else if (arith_operator == "*") sig = MUL;
     else if (arith_operator == "/") {
       if (sv.size() != 3) {
         return make_error(sv, "`/` expects exactly two operands.");
@@ -471,7 +467,7 @@ class SMTParser {
   // F make_assertion(const SV& sv) {
   //   if (sv.size() == 1) {
   //     return f(sv[0]);
-  //   } 
+  //   }
   //   else {
   //     FSeq disjuncts;
   //     auto logic_operator = std::any_cast<std::string>(sv[0]); // OR
