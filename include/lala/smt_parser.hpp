@@ -50,57 +50,57 @@ class SMTParser {
   SMTParser() : error(false), silent(false) {}
 
   F parse(const std::string& input) {
-    // const auto parse_start = std::chrono::steady_clock::now();
-    // const auto report_elapsed = [&parse_start]() {
-    //   const auto elapsed = std::chrono::duration<double>(
-    //     std::chrono::steady_clock::now() - parse_start);
-    //   std::cerr << "SMTParser::parse() took " << elapsed.count() << " s" << std::endl;
-    // };
+      // const auto parse_start = std::chrono::steady_clock::now();
+      // const auto report_elapsed = [&parse_start]() {
+      //   const auto elapsed = std::chrono::duration<double>(
+      //     std::chrono::steady_clock::now() - parse_start);
+      //   std::cerr << "SMTParser::parse() took " << elapsed.count() << " s" << std::endl;
+      // };
 			peg::parser parser(R"(
-				Statements     <- (DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
+        Statements     <- (DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
 
-				Integer        <- < [+-]?[0-9]+ >
-				Real           <- < ('inf' / '-inf' /
-														[+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
-														([Ee][+-]?[0-9]+)) ) >
-	      Boolean        <- < 'true' / 'false' >
+			  Integer        <- < [+-]?[0-9]+ >
+			  Real           <- < ('inf' / '-inf' /
+                            [+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
+                            ([Ee][+-]?[0-9]+)) ) >
+        Boolean        <- < 'true' / 'false' >
         Literal        <- Real / Boolean / Integer
 
-				SimpleSymbol   <- < [a-zA-Z_?~!$%^&*+=<>/-][a-zA-Z0-9_?~!$%^&*+=<>/-@.]* >
-				QuotedSymbol   <- < '|' (!'|' .)* '|' >
+        SimpleSymbol   <- < [a-zA-Z_?~!$%^&*+=<>/-][a-zA-Z0-9_?~!$%^&*+=<>/-@.]* >
+        QuotedSymbol   <- < '|' (!'|' .)* '|' >
         Symbol         <- QuotedSymbol / SimpleSymbol
         Identifier     <- Symbol
-
+        
         Sort           <- < 'Real' / 'Bool' / 'Int' >
         SortedVars     <- '(' ( '(' Symbol Sort ')' )* ')'
 
         DeclareConst   <- '(' 'declare-const' Symbol Sort ')'
-				DeclareFun     <- '(' 'declare-fun' Symbol '(' ')' Sort ')'
+        DeclareFun     <- '(' 'declare-fun' Symbol '(' ')' Sort ')'
         DefineFun      <- '(' 'define-fun' Symbol SortedVars Sort Term ')'
 
         BinaryOp       <- < '<=' / '>=' / '=' / '>' / '<' >
-				LogicOp        <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
-				ArithOp        <- < '+' / '-' / '*' / '/' >
-
-				Arith          <- '(' ArithOp Term+ ')'
-				Ite            <- '(' 'ite' Term Term Term ')'
-	      FunApplication <- '(' Symbol Term+ ')' 
-	        
+        LogicOp        <- < 'and' / 'or' / 'not' / '=>' / 'xor' >
+        ArithOp        <- < '+' / '-' / '*' / '/' >
+        
+        Arith          <- '(' ArithOp Term+ ')'
+        Ite            <- '(' 'ite' Term Term Term ')'
+        FunApplication <- '(' Symbol Term+ ')' 
+        
         Let            <- '(' 'let' '(' ('(' Symbol Term ')')+ ')' Term ')'
         Distinct       <- '(' 'distinct' Term Term+ ')'
         Bound          <- '(' BinaryOp Term Term ')'
         Constraint     <- '(' LogicOp Term+ ')'
         Term           <- Let / Distinct / Constraint / Bound / Ite / Arith / Literal / FunApplication / Identifier
         Assertion      <- '(' 'assert' Term ')'
-
-				IgnoredAtom    <- < [^() \n\r\t]+ >
-				IgnoredQuoted  <- '"' ( '""' / !'"' . )* '"'
-				IgnoredBar     <- '|' (!'|' .)* '|'
-				IgnoredSExpr   <- IgnoredQuoted / IgnoredBar / IgnoredAtom / '(' IgnoredSExpr* ')'
-				IgnoredCmd     <- '(' ('set-info' / 'set-logic' / 'check-sat' / 'exit') IgnoredSExpr* ')'
-
-				~Comment       <- ';' [^\n\r]* [ \n\r\t]* / IgnoredCmd
-				%whitespace    <- [ \n\r\t]*
+        
+        IgnoredAtom    <- < [^() \n\r\t]+ >
+        IgnoredQuoted  <- '"' ( '""' / !'"' . )* '"'
+        IgnoredBar     <- '|' (!'|' .)* '|'
+        IgnoredSExpr   <- IgnoredQuoted / IgnoredBar / IgnoredAtom / '(' IgnoredSExpr* ')'
+        IgnoredCmd     <- '(' ('set-info' / 'set-logic' / 'check-sat' / 'exit') IgnoredSExpr* ')'
+        
+        ~Comment       <- ';' [^\n\r]* [ \n\r\t]* / IgnoredCmd
+        %whitespace    <- [ \n\r\t]*
 			)");
     assert(static_cast<bool>(parser) == true);
 
@@ -115,11 +115,11 @@ class SMTParser {
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["ArithOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["Sort"] = [](const SV& sv) { return sv.token_to_string(); };
-	  parser["DeclareConst"] = [this](const SV& sv) { return make_variable_decl(sv); };
-	  parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
+    parser["DeclareConst"] = [this](const SV& sv) { return make_variable_decl(sv); };
+    parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
     parser["SortedVars"] = [this](const SV& sv) { return make_sorted_vars(sv); };
-	  parser["DefineFun"] = [this](const SV& sv) { return make_define_fun(sv); };
-	  parser["Let"] = [this](const SV& sv) { return make_let(sv); };
+    parser["DefineFun"] = [this](const SV& sv) { return make_define_fun(sv); };
+    parser["Let"] = [this](const SV& sv) { return make_let(sv); };
     parser["Distinct"] = [this](const SV& sv) { return make_distinct(sv); };
     parser["Ite"] = [this](const SV& sv) { return make_ite(sv); };
     parser["Arith"] = [this](const SV& sv) { return make_arith(sv); };
@@ -317,7 +317,8 @@ class SMTParser {
       // Expected sv[i] is a symbol, which is the name of the binding.
       try {
         name = std::any_cast<std::string>(sv[i]);
-      } catch (const std::bad_any_cast&) { // If it is not, report an error.
+      } 
+      catch (const std::bad_any_cast&) { // If it is not, report an error.
         return make_error(sv, "Incorrect `let` binding name.");
       }
       // Check for duplicate bindings.
@@ -370,7 +371,8 @@ class SMTParser {
     Sig sig;
     if (arith_operator == "+") {
       sig = ADD;
-    } else if (arith_operator == "-") {
+    } 
+    else if (arith_operator == "-") {
       // Negative is represented as a unary operator in AST.
       if (sv.size() == 2) {
         return F::make_unary(NEG, f(sv[1]));
@@ -378,9 +380,11 @@ class SMTParser {
       // Subtraction is parsed with make_nary instead of explicitly handled in left-associative way with make_binary.
       // It will be ternarized in left-fold way in ternarize.hpp so that the left-associative property is preserved.
       sig = SUB;
-    } else if (arith_operator == "*") {
+    } 
+    else if (arith_operator == "*") {
       sig = MUL;
-    } else if (arith_operator == "/") {
+    } 
+    else if (arith_operator == "/") {
       if (sv.size() != 3) {
         return make_error(sv, "`/` expects exactly two operands.");
       }
@@ -420,13 +424,11 @@ class SMTParser {
         return make_error(sv, "`not` expects exactly one argument.");
       }
       return F::make_unary(NOT, f(sv[1]));
-    } else if (logic_operator == "and") {
-      sig = AND;
-    } else if (logic_operator == "or") {
-      sig = OR;
-    } else if (logic_operator == "xor") {
-      sig = XOR;
-    } else if (logic_operator == "=>") {
+    }
+    else if (logic_operator == "and") sig = AND;
+    else if (logic_operator == "or") sig = OR;
+    else if (logic_operator == "xor") sig = XOR;
+    else if (logic_operator == "=>") {
       // Implication is right-associative and SMT allows n-ary syntax for right-associative op
       // (=> a b c) == (=> a (=> b c))
       F implication = f(sv[sv.size() - 1]);
@@ -451,7 +453,7 @@ class SMTParser {
   F make_statements(const SV& sv) {
     if (sv.size() == 1) {
       return f(sv[0]);
-    } 
+    }
     else {
       FSeq children;
       for (size_t i = 0; i < sv.size(); ++i) {
@@ -496,7 +498,8 @@ TFormula<Allocator> parse_smt(const std::string& filename) {
     std::string input((std::istreambuf_iterator<char>(t)),
                       std::istreambuf_iterator<char>());
     return parse_smt_str<Allocator>(input);
-  } else {
+  }
+  else {
     std::cerr << "File `" << filename << "` does not exists." << std::endl;
   }
   return TFormula<Allocator>::make_false();
