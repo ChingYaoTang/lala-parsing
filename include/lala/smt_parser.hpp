@@ -58,7 +58,7 @@ class SMTParser {
       // };
       peg::parser parser(R"(
         Statements     <- (DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
-    		
+
         Integer        <- < [+-]?[0-9]+ >
         Real           <- < ('inf' / '-inf' /
                             [+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
@@ -369,7 +369,9 @@ class SMTParser {
     auto arith_operator = std::any_cast<std::string>(sv[0]);
 
     Sig sig;
-    if (arith_operator == "+") sig = ADD;
+    if (arith_operator == "+") {
+      sig = ADD;
+    }
     else if (arith_operator == "-") {
       // Negative is represented as a unary operator in AST.
       if (sv.size() == 2) {
@@ -379,7 +381,9 @@ class SMTParser {
       // It will be ternarized in left-fold way in ternarize.hpp so that the left-associative property is preserved.
       sig = SUB;
     }
-    else if (arith_operator == "*") sig = MUL;
+    else if (arith_operator == "*") {
+      sig = MUL;
+    }
     else if (arith_operator == "/") {
       if (sv.size() != 3) {
         return make_error(sv, "`/` expects exactly two operands.");
