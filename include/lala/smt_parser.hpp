@@ -43,11 +43,14 @@ class SMTParser {
   std::map<std::string, So> declared_symbols; // Symbol name -> sort.
   std::map<std::string, DefinedFunction> defined_functions; // Function name -> signature and body.
   std::map<std::string, So> active_function_parameters; // Parameters currently in scope while parsing a function body.
+  bool is_nnv;
   bool error;   // If an error was found during parsing.
   bool silent;  // If we do not want to output error messages.
 
+  SolverOutput<Allocator>& output;
+
  public:
-  SMTParser() : error(false), silent(false) {}
+  SMTParser(SolverOutput<Allocator>& output, bool is_nnv) : error(false), silent(false), output(output), is_nnv(is_nnv) {}
 
   F parse(const std::string& input) {
       // const auto parse_start = std::chrono::steady_clock::now();
@@ -105,7 +108,8 @@ class SMTParser {
     assert(static_cast<bool>(parser) == true);
 
     parser["Statements"] = [this](const SV& sv) { return make_statements(sv); };
-    parser["Integer"] = [](const SV& sv) { return F::make_z(sv.token_to_number<logic_int>()); };
+    // parser["Integer"] = [](const SV& sv) { return F::make_z(sv.token_to_number<logic_int>()); };
+    parser["Integer"] = [](const SV& sv) { return F::make_real(impl::string_to_real(sv.token_to_string())); };
     parser["Real"] = [](const SV& sv) { return F::make_real(impl::string_to_real(sv.token_to_string())); };
     parser["Boolean"] = [](const SV& sv) { return sv.token_to_string() == "true" ? F::make_true() : F::make_false(); };
     parser["SimpleSymbol"] = [](const SV& sv) { return sv.token_to_string(); };
@@ -165,22 +169,28 @@ class SMTParser {
   }
 
   F make_variable_decl(const SV& sv) {
-    // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp
-    // for the implementation of variable declaration.
-
-    // Expected semantic values: [Symbol, Sort].
-    auto name = std::any_cast<std::string>(sv[0]);
-    // Check if the variable name is already used by a declared symbol or a defined function.
-    if (declared_symbols.contains(name) || defined_functions.contains(name)) {
-      return make_error(sv, "Symbol `" + name + "` already declared.");
+    if(is_nnv) {
+      return F::make_true();
     }
+    else {
+      // Refer to make_parameter_decl(), make_existential(), and make_variable_decl() in flatzinc_parser.hpp
+      // for the implementation of variable declaration.
 
-    auto sort_name = std::any_cast<std::string>(sv[1]);
-    // Get the corresponding sort type object
-    So var_sort = get_sort_type(sort_name);
-    
-    declared_symbols.emplace(name, var_sort);
-    return F::make_exists(UNTYPED, LVar<allocator_type>(name.data()), std::move(var_sort));
+      // Expected semantic values: [Symbol, Sort].
+      std::string name = std::any_cast<std::string>(sv[0]);
+      // Check if the variable name is already used by a declared symbol or a defined function.
+      if (declared_symbols.contains(name) || defined_functions.contains(name)) {
+        return make_error(sv, "Symbol `" + name + "` already declared.");
+      }
+
+      std::string sort_name = std::any_cast<std::string>(sv[1]);
+      // Get the corresponding sort type object
+      So var_sort = get_sort_type(sort_name);
+      
+      declared_symbols.emplace(name, var_sort);
+      output.add_var(name);
+      return F::make_exists(UNTYPED, LVar<allocator_type>(name), std::move(var_sort));
+    }
   }
 
   std::vector<std::pair<std::string, So>> make_sorted_vars(const SV& sv) {
@@ -485,19 +495,39 @@ class SMTParser {
 };
 }  // namespace impl
 
+// template <class Allocator>
+// TFormula<Allocator> parse_smt_str(const std::string& input) {
+//   impl::SMTParser<Allocator> parser;
+//   return parser.parse(input);
+// }
+
 template <class Allocator>
-TFormula<Allocator> parse_smt_str(const std::string& input) {
-  impl::SMTParser<Allocator> parser;
+TFormula<Allocator> parse_smt_str(const std::string& input, SolverOutput<Allocator>& output, bool is_nnv) {
+  impl::SMTParser<Allocator> parser(output, is_nnv);
   return parser.parse(input);
 }
 
+// template <class Allocator>
+// TFormula<Allocator> parse_smt(const std::string& filename) {
+//   std::ifstream t(filename);
+//   if (t.is_open()) {
+//     std::string input((std::istreambuf_iterator<char>(t)),
+//                       std::istreambuf_iterator<char>());
+//     return parse_smt_str<Allocator>(input);
+//   }
+//   else {
+//     std::cerr << "File `" << filename << "` does not exists." << std::endl;
+//   }
+//   return TFormula<Allocator>::make_false();
+// }
+
 template <class Allocator>
-TFormula<Allocator> parse_smt(const std::string& filename) {
+TFormula<Allocator> parse_smt(const std::string& filename, SolverOutput<Allocator>& output, bool is_nnv) {
   std::ifstream t(filename);
   if (t.is_open()) {
     std::string input((std::istreambuf_iterator<char>(t)),
                       std::istreambuf_iterator<char>());
-    return parse_smt_str<Allocator>(input);
+    return parse_smt_str<Allocator>(input, output, is_nnv);
   }
   else {
     std::cerr << "File `" << filename << "` does not exists." << std::endl;
