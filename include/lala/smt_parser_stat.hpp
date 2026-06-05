@@ -1,11 +1,19 @@
 // Copyright 2025 Yi-Nung Tsao
 
-#ifndef LALA_PARSING_SMT_PARSER_HPP
-#define LALA_PARSING_SMT_PARSER_HPP
+/**
+ * SMT-LIB parser variant used by parser-only statistics tools.
+ *
+ * The parser logic is shared between normal parsing and stats collection. The
+ * collect_stats switch only controls whether semantic actions update counters.
+ */
+
+#ifndef LALA_PARSING_SMT_PARSER_STAT_HPP
+#define LALA_PARSING_SMT_PARSER_STAT_HPP
 
 #include "peglib.h"
 #include <any>
 #include <cassert>
+// #include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
@@ -22,6 +30,48 @@
 #include "flatzinc_parser.hpp"
 
 namespace lala {
+
+struct SMTParseStats {
+  std::string theory;
+  std::string expected_status;
+
+  size_t var_total = 0;
+  size_t var_bool = 0;
+  size_t var_int = 0;
+  size_t var_real = 0;
+
+  size_t cmd_assert = 0;
+  size_t cmd_declare_fun = 0;
+  size_t cmd_declare_const = 0;
+  size_t cmd_define_fun = 0;
+
+  size_t op_le = 0;
+  size_t op_ge = 0;
+  size_t op_eq = 0;
+  size_t op_gt = 0;
+  size_t op_lt = 0;
+  size_t op_and = 0;
+  size_t op_or = 0;
+  size_t op_not = 0;
+  size_t op_imply = 0;
+  size_t op_xor = 0;
+  size_t op_add = 0;
+  size_t op_sub = 0;
+  size_t op_mul = 0;
+  size_t op_div = 0;
+  size_t op_ite = 0;
+  size_t op_let = 0;
+  size_t op_distinct = 0;
+  size_t op_fun_application = 0;
+};
+
+template <class Allocator>
+struct SMTParseResult {
+  TFormula<Allocator> formula;
+  bool success = false;
+  std::string diagnostic;
+  SMTParseStats stats;
+};
 
 namespace impl {
 
@@ -45,15 +95,33 @@ class SMTParser {
   bool is_nnv;
   bool error;   // If an error was found during parsing.
   bool silent;  // If we do not want to output error messages.
+  bool collect_stats;
+  std::string first_diagnostic;
+  SMTParseStats stats;
 
   SolverOutput<Allocator>& output;
 
  public:
-  SMTParser(SolverOutput<Allocator>& output, bool is_nnv) : error(false), silent(false), output(output), is_nnv(is_nnv) {}
+  SMTParser(SolverOutput<Allocator>& output, bool is_nnv)
+    : is_nnv(is_nnv), error(false), silent(false), collect_stats(true), output(output) {}
 
   F parse(const std::string& input) {
-      peg::parser parser(R"(
-        Statements     <- (DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
+    return parse_with_status(input, false).formula;
+  }
+
+  SMTParseResult<Allocator> parse_with_status(const std::string& input, bool should_collect_stats = true) {
+    error = false;
+    collect_stats = should_collect_stats;
+    first_diagnostic.clear();
+    stats = SMTParseStats{};
+    // const auto parse_start = std::chrono::steady_clock::now();
+    // const auto report_elapsed = [&parse_start]() {
+    //   const auto elapsed = std::chrono::duration<double>(
+    //      std::chrono::steady_clock::now() - parse_start);
+    //   std::cerr << "SMTParser::parse() took " << elapsed.count() << " s" << std::endl;
+    // };
+    peg::parser parser(R"(
+        Statements     <- (StatusInfo / SetLogic / DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
 
         Integer        <- < [+-]?[0-9]+ >
         Real           <- < ('inf' / '-inf' /
@@ -69,6 +137,11 @@ class SMTParser {
         
         Sort           <- < 'Real' / 'Bool' / 'Int' >
         SortedVars     <- '(' ( '(' Symbol Sort ')' )* ')'
+
+        Status         <- < 'sat' / 'unsat' / 'unknown' >
+        LogicName      <- < [a-zA-Z0-9_+-]+ >
+        StatusInfo     <- '(' 'set-info' ':status' Status ')'
+        SetLogic       <- '(' 'set-logic' LogicName ')'
 
         DeclareConst   <- '(' 'declare-const' Symbol Sort ')'
         DeclareFun     <- '(' 'declare-fun' Symbol '(' ')' Sort ')'
@@ -112,8 +185,12 @@ class SMTParser {
     parser["LogicOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["ArithOp"] = [](const SV& sv) { return sv.token_to_string(); };
     parser["Sort"] = [](const SV& sv) { return sv.token_to_string(); };
-    parser["DeclareConst"] = [this](const SV& sv) { return make_variable_decl(sv); };
-    parser["DeclareFun"] = [this](const SV& sv) { return make_variable_decl(sv); };
+    parser["Status"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["LogicName"] = [](const SV& sv) { return sv.token_to_string(); };
+    parser["StatusInfo"] = [this](const SV& sv) { return make_status_info(sv); };
+    parser["SetLogic"] = [this](const SV& sv) { return make_set_logic(sv); };
+    parser["DeclareConst"] = [this](const SV& sv) { return make_declare_const(sv); };
+    parser["DeclareFun"] = [this](const SV& sv) { return make_declare_fun(sv); };
     parser["SortedVars"] = [this](const SV& sv) { return make_sorted_vars(sv); };
     parser["DefineFun"] = [this](const SV& sv) { return make_define_fun(sv); };
     parser["Let"] = [this](const SV& sv) { return make_let(sv); };
@@ -123,25 +200,40 @@ class SMTParser {
     parser["FunApplication"] = [this](const SV& sv) { return make_fun_application(sv); };
     parser["Bound"] = [this](const SV& sv) { return make_bound(sv); };
     parser["Constraint"] = [this](const SV& sv) { return make_constraint(sv); };
-    // parser["Assertion"] = [this](const SV& sv) { return make_assertion(sv); };
+    parser["Assertion"] = [this](const SV& sv) { return make_assertion(sv); };
 
     F smt_formulas;
+    SMTParseResult<Allocator> result;
     if (parser.parse(input.c_str(), smt_formulas) && !error) {
-      return smt_formulas;
+      // report_elapsed();
+      result.formula = std::move(smt_formulas);
+      result.success = true;
     }
     else {
+      // report_elapsed();
+      if (first_diagnostic.empty()) {
+        first_diagnostic = "SMT parsing is failed.";
+      }
       std::cerr << "SMT parsing is failed." << std::endl;
-      return F::make_false();
+      result.formula = F::make_false();
+      result.success = false;
+      result.diagnostic = first_diagnostic;
     }
+    result.stats = stats;
+    return result;
   }
 
  private:
   static F f(const std::any& any) { return std::any_cast<F>(any); }
 
   F make_error(const SV& sv, const std::string& msg) {
+    std::string diagnostic = std::to_string(sv.line_info().first) + ":" +
+      std::to_string(sv.line_info().second) + ":" + msg;
     if (!silent) {
-      std::cerr << sv.line_info().first << ":" << sv.line_info().second << ":"
-                << msg << std::endl;
+      std::cerr << diagnostic << std::endl;
+    }
+    if (first_diagnostic.empty()) {
+      first_diagnostic = diagnostic;
     }
     error = true;
 
@@ -157,6 +249,52 @@ class SMTParser {
     }
     assert(sort_name == "Bool");
     return So(So::Bool);
+  }
+
+  void count_stat(size_t& counter) {
+    if (collect_stats) {
+      counter++;
+    }
+  }
+
+  F make_status_info(const SV& sv) {
+    if (collect_stats) {
+      stats.expected_status = std::any_cast<std::string>(sv[0]);
+    }
+    return F::make_true();
+  }
+
+  F make_set_logic(const SV& sv) {
+    if (collect_stats) {
+      stats.theory = std::any_cast<std::string>(sv[0]);
+    }
+    return F::make_true();
+  }
+
+  F make_declare_const(const SV& sv) {
+    count_stat(stats.cmd_declare_const);
+    return make_variable_decl(sv);
+  }
+
+  F make_declare_fun(const SV& sv) {
+    count_stat(stats.cmd_declare_fun);
+    return make_variable_decl(sv);
+  }
+
+  void count_declared_variable(const So& sort) {
+    if (!collect_stats) {
+      return;
+    }
+    stats.var_total++;
+    if (sort.is_bool()) {
+      stats.var_bool++;
+    }
+    else if (sort.is_int()) {
+      stats.var_int++;
+    }
+    else if (sort.is_real()) {
+      stats.var_real++;
+    }
   }
 
   F make_variable_decl(const SV& sv) {
@@ -180,6 +318,7 @@ class SMTParser {
       
       declared_symbols.emplace(name, var_sort);
       output.add_var(name);
+      count_declared_variable(var_sort);
       return F::make_exists(UNTYPED, LVar<allocator_type>(name), std::move(var_sort));
     }
   }
@@ -210,6 +349,8 @@ class SMTParser {
   }
 
   F make_define_fun(const SV& sv) {
+    count_stat(stats.cmd_define_fun);
+
     // Expected semantic values:
     // [Symbol(function name), SortedVarList(params), Sort(return sort), Term(body)].
     // The grammar has already parsed the parameter list before the body, so
@@ -278,6 +419,8 @@ class SMTParser {
   }
 
   F make_fun_application(const SV& sv) {
+    count_stat(stats.op_fun_application);
+
     // Expected semantic values: [Symbol(function name), Term(arg1), Term(arg2), ...].
     auto callee = std::any_cast<std::string>(sv[0]);
     auto fun_it = defined_functions.find(callee);
@@ -304,6 +447,8 @@ class SMTParser {
   }
 
   F make_let(const SV& sv) {
+    count_stat(stats.op_let);
+
     // Expected semantic values:
     // [Symbol, Term, Symbol, Term, ..., Term(body)].
     // One binding is (Symbol, Term pair).
@@ -335,6 +480,8 @@ class SMTParser {
   }
 
   F make_ite(const SV& sv) {
+    count_stat(stats.op_ite);
+
     FSeq seq;
     seq.push_back(f(sv[0]));
     seq.push_back(f(sv[1]));
@@ -345,6 +492,8 @@ class SMTParser {
   // SMT-LIB n-ary `distinct` means every pair of operands is different.
   // Turbo's `NEQ` is interpreted as a binary disequality, so n-ary `distinct` must be expanded into an AND of pairwise binary NEQ nodes.
   F make_distinct(const SV& sv) {
+    count_stat(stats.op_distinct);
+
     // Expected semantic values: [Term1, Term2, ...].
     if (sv.size() == 2) {
       return F::make_binary(f(sv[0]), NEQ, f(sv[1]));
@@ -371,9 +520,11 @@ class SMTParser {
 
     Sig sig;
     if (arith_operator == "+") {
+      count_stat(stats.op_add);
       sig = ADD;
     }
     else if (arith_operator == "-") {
+      count_stat(stats.op_sub);
       // Negative is represented as a unary operator in AST.
       if (sv.size() == 2) {
         return F::make_unary(NEG, f(sv[1]));
@@ -383,9 +534,11 @@ class SMTParser {
       sig = SUB;
     }
     else if (arith_operator == "*") {
+      count_stat(stats.op_mul);
       sig = MUL;
     }
     else if (arith_operator == "/") {
+      count_stat(stats.op_div);
       if (sv.size() != 3) {
         return make_error(sv, "`/` expects exactly two operands.");
       }
@@ -407,11 +560,26 @@ class SMTParser {
   F make_bound(const SV& sv) {
     auto binary_operator = std::any_cast<std::string>(sv[0]);
     Sig sig;
-    if (binary_operator == "=") sig = EQ;
-    else if (binary_operator == "<=") sig = LEQ;
-    else if (binary_operator == ">=") sig = GEQ;
-    else if (binary_operator == ">") sig = GT;
-    else if (binary_operator == "<") sig = LT;
+    if (binary_operator == "=") {
+      count_stat(stats.op_eq);
+      sig = EQ;
+    }
+    else if (binary_operator == "<=") {
+      count_stat(stats.op_le);
+      sig = LEQ;
+    }
+    else if (binary_operator == ">=") {
+      count_stat(stats.op_ge);
+      sig = GEQ;
+    }
+    else if (binary_operator == ">") {
+      count_stat(stats.op_gt);
+      sig = GT;
+    }
+    else if (binary_operator == "<") {
+      count_stat(stats.op_lt);
+      sig = LT;
+    }
 
     return F::make_binary(f(sv[1]), sig, f(sv[2]));
   }
@@ -421,20 +589,26 @@ class SMTParser {
 
     Sig sig;
     if (logic_operator == "not") {
+      count_stat(stats.op_not);
       if (sv.size() != 2) {
         return make_error(sv, "`not` expects exactly one argument.");
       }
       return F::make_unary(NOT, f(sv[1]));
     }
-    else if (logic_operator == "and") sig = AND;
-    else if (logic_operator == "or") sig = OR;
+    else if (logic_operator == "and") {
+      count_stat(stats.op_and);
+      sig = AND;
+    }
+    else if (logic_operator == "or") {
+      count_stat(stats.op_or);
+      sig = OR;
+    }
     else if (logic_operator == "xor") {
-      if (sv.size() < 3) {
-        return make_error(sv, "`" + logic_operator + "` expects at least two operands.");
-      }
+      count_stat(stats.op_xor);
       sig = XOR;
     }
     else if (logic_operator == "=>") {
+      count_stat(stats.op_imply);
       // Implication is right-associative and SMT allows n-ary syntax for right-associative op
       // (=> a b c) == (=> a (=> b c))
       F implication = f(sv[sv.size() - 1]);
@@ -444,12 +618,21 @@ class SMTParser {
       return implication;
     }
 
+    if (sv.size() < 3) {
+      return make_error(sv, "`" + logic_operator + "` expects at least two operands.");
+    }
+
     FSeq seq;
     for (size_t i = 1; i < sv.size(); ++i) {
       seq.push_back(f(sv[i]));
     }
 
     return F::make_nary(sig, std::move(seq));
+  }
+
+  F make_assertion(const SV& sv) {
+    count_stat(stats.cmd_assert);
+    return f(sv[0]);
   }
 
   F make_statements(const SV& sv) {
@@ -499,6 +682,16 @@ TFormula<Allocator> parse_smt_str(const std::string& input, SolverOutput<Allocat
   return parser.parse(input);
 }
 
+template <class Allocator>
+SMTParseResult<Allocator> parse_smt_str_with_status(
+    const std::string& input,
+    SolverOutput<Allocator>& output,
+    bool is_nnv,
+    bool collect_stats = true) {
+  impl::SMTParser<Allocator> parser(output, is_nnv);
+  return parser.parse_with_status(input, collect_stats);
+}
+
 // template <class Allocator>
 // TFormula<Allocator> parse_smt(const std::string& filename) {
 //   std::ifstream t(filename);
@@ -525,6 +718,26 @@ TFormula<Allocator> parse_smt(const std::string& filename, SolverOutput<Allocato
     std::cerr << "File `" << filename << "` does not exists." << std::endl;
   }
   return TFormula<Allocator>::make_false();
+}
+
+template <class Allocator>
+SMTParseResult<Allocator> parse_smt_with_status(
+    const std::string& filename,
+    SolverOutput<Allocator>& output,
+    bool is_nnv,
+    bool collect_stats = true) {
+  std::ifstream t(filename);
+  if (t.is_open()) {
+    std::string input((std::istreambuf_iterator<char>(t)),
+                      std::istreambuf_iterator<char>());
+    return parse_smt_str_with_status<Allocator>(input, output, is_nnv, collect_stats);
+  }
+  SMTParseResult<Allocator> result;
+  result.formula = TFormula<Allocator>::make_false();
+  result.success = false;
+  result.diagnostic = "File `" + filename + "` does not exists.";
+  std::cerr << result.diagnostic << std::endl;
+  return result;
 }
 
 }  // namespace lala
