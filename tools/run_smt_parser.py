@@ -26,45 +26,47 @@ STACK_SIGNALS = {
 }
 STACK_SIGNALS.discard(None)
 
-STAT_FIELDS = [
-    "var_total",
-    "var_bool",
-    "var_int",
-    "var_real",
-    "cmd_assert",
-    "cmd_declare_fun",
-    "cmd_declare_const",
-    "cmd_define_fun",
-    "op_le",
-    "op_ge",
-    "op_eq",
-    "op_gt",
-    "op_lt",
-    "op_and",
-    "op_or",
-    "op_not",
-    "op_imply",
-    "op_xor",
-    "op_add",
-    "op_sub",
-    "op_mul",
-    "op_div",
-    "op_ite",
-    "op_let",
-    "op_distinct",
-    "op_fun_application",
+STAT_FIELD_MAP = [
+    ("var_total", "var_total"),
+    ("var_bool", "var_bool"),
+    ("var_int", "var_int"),
+    ("var_real", "var_real"),
+    ("assert", "cmd_assert"),
+    ("declare_fun", "cmd_declare_fun"),
+    ("declare_const", "cmd_declare_const"),
+    ("define_fun", "cmd_define_fun"),
+    ("le", "op_le"),
+    ("ge", "op_ge"),
+    ("eq", "op_eq"),
+    ("gt", "op_gt"),
+    ("lt", "op_lt"),
+    ("and", "op_and"),
+    ("or", "op_or"),
+    ("not", "op_not"),
+    ("imply", "op_imply"),
+    ("xor", "op_xor"),
+    ("add", "op_add"),
+    ("sub", "op_sub"),
+    ("mul", "op_mul"),
+    ("div", "op_div"),
+    ("ite", "op_ite"),
+    ("let", "op_let"),
+    ("distinct", "op_distinct"),
+    ("fun_application", "op_fun_application"),
 ]
+
+STAT_FIELDS = [csv_field for csv_field, _ in STAT_FIELD_MAP]
 
 CSV_FIELDS = [
     "instance_path",
     "theory",
     "expected_status",
+    "parse_seconds",
     "parse_success",
     "failure_kind",
     "signal_name",
-    "parse_seconds",
-    "max_sexpr_depth",
     "diagnostic",
+    "max_sexpr_depth",
     *STAT_FIELDS,
 ]
 
@@ -262,8 +264,8 @@ def run_one(probe: Path, root: Path, smt_file: Path, timing_only: bool) -> Dict[
       row["theory"] = str(probe_json.get("theory", ""))
       row["expected_status"] = str(probe_json.get("expected_status", ""))
     if success and stats_collected:
-      for field in STAT_FIELDS:
-        row[field] = probe_json.get(field, 0)
+      for csv_field, probe_field in STAT_FIELD_MAP:
+        row[csv_field] = probe_json.get(probe_field, 0)
     return row
 
   row["parse_seconds"] = elapsed
