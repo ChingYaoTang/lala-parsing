@@ -133,8 +133,8 @@ def iter_smt2_files(root: Path) -> Iterator[Path]:
 
 def instance_path(root: Path, smt_file: Path) -> str:
   if root.is_file():
-    return smt_file.name
-  return str(smt_file.relative_to(root))
+    return str(smt_file.relative_to(root.parent.parent))
+  return str(smt_file.relative_to(root.parent))
 
 
 def max_sexpr_depth(path: Path) -> int:

@@ -1,13 +1,6 @@
 #!/bin/bash -l
 #
-# Build and run the parser-only SMT statistics probe on an HPC Slurm node.
-
-#------------------------------------------------------------------------------
-# Slurm defaults
-#------------------------------------------------------------------------------
-# Override these at submission time if your account or partition needs different
-# settings, for example: sbatch --partition=batch --account=my_project ...
-#SBATCH --job-name=smt_parser_stats
+#SBATCH --job-name=QF_LRA
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -21,23 +14,30 @@ set -euo pipefail
 #------------------------------------------------------------------------------
 # Paths
 #------------------------------------------------------------------------------
-# Submit this script from the repository root. SMT_ROOT, LOG_DIR, and OUTPUT_CSV
-# can be overridden with sbatch --export=ALL,NAME=value.
+# Submit this script from the repo lala-parsing
+# Ex: sbatch --export=ALL,SMT_ROOT=../jet/benchs/smt/non-incremental/QF_LRA tools/run_smt_parser_stats.sbatch
+# SMT_ROOT, LOG_DIR, and OUTPUT_CSV can be overridden with sbatch --export=ALL,NAME=value.
 REPO_ROOT="${SLURM_SUBMIT_DIR:-$(pwd)}"
-SMT_ROOT="${SMT_ROOT:-../jet/benchs/smt}"
-LOG_DIR="${LOG_DIR:-../jet/benchs/log}"
-BUILD_DIR="${REPO_ROOT}/lala-parsing/build/smt-parser-stat"
-PROBE="${BUILD_DIR}/smt_parser_probe"
+
+JOB_NAME="${SLURM_JOB_NAME}"
+JOB_ID="${SLURM_JOB_ID}"
+
+LOG_DIR="${LOG_DIR:-../jet/benchs/smt_stats/${JOB_NAME}-${JOB_ID}}"
+# stdout and stderr logs
+OUT_LOG="${LOG_DIR}/std.out"
+ERR_LOG="${LOG_DIR}/std.err"
+# Output CSV stats
 OUTPUT_CSV="${OUTPUT_CSV:-${LOG_DIR}/smt_parser_stats.csv}"
+# smt banchmarks
+SMT_ROOT="${SMT_ROOT:-../jet/benchs/smt/non-incremental}"
+# Parser executable
+BUILD_DIR="${REPO_ROOT}/build/smt-parser-stat"
+PROBE="${BUILD_DIR}/smt_parser_probe"
+
 JOBS="${SLURM_CPUS_PER_TASK:-16}"
 
 cd "${REPO_ROOT}"
 mkdir -p "${LOG_DIR}"
-
-JOB_NAME="${SLURM_JOB_NAME:-smt_parser_stats}"
-JOB_ID="${SLURM_JOB_ID:-local}"
-OUT_LOG="${LOG_DIR}/${JOB_NAME}-${JOB_ID}.out"
-ERR_LOG="${LOG_DIR}/${JOB_NAME}-${JOB_ID}.err"
 
 exec >"${OUT_LOG}" 2>"${ERR_LOG}"
 
@@ -62,7 +62,7 @@ module load lang/Python
 #------------------------------------------------------------------------------
 # Build parser-only executable
 #------------------------------------------------------------------------------
-cmake -S lala-parsing -B "${BUILD_DIR}" \
+cmake -S "${REPO_ROOT}" -B "${BUILD_DIR}" \
   -DGPU=OFF \
   -DLOCAL_DEPS=ON \
   -DCMAKE_BUILD_TYPE=Release \
@@ -85,7 +85,7 @@ fi
 #------------------------------------------------------------------------------
 # Run stats mode
 #------------------------------------------------------------------------------
-python3 lala-parsing/tools/run_smt_parser.py \
+python3 tools/run_smt_parser.py \
   "${SMT_ROOT}" \
   --probe "${PROBE}" \
   --output "${OUTPUT_CSV}" \
