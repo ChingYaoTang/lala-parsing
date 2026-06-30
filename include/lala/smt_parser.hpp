@@ -1,4 +1,4 @@
-// Copyright 2025 Yi-Nung Tsao
+// Copyright 2025 Yi-Nung Tsao, Ching-Yao Tang
 
 #ifndef LALA_PARSING_SMT_PARSER_HPP
 #define LALA_PARSING_SMT_PARSER_HPP
@@ -56,11 +56,9 @@ class SMTParser {
         Statements     <- (DeclareConst / DeclareFun / DefineFun / Assertion / Comment)+
 
         Integer        <- < [+-]?[0-9]+ >
-        Real           <- < ('inf' / '-inf' /
-                            [+-]?[0-9]+ (('.' (&'..' / !'.') [0-9]*) /
-                            ([Ee][+-]?[0-9]+)) ) >
+        Real           <- < ('inf' / '-inf' / [+-]?[0-9]+ ('.' [0-9]*)? ([Ee][+-]?[0-9]+)? ) >
         Boolean        <- < 'true' / 'false' >
-        Literal        <- Real / Boolean / Integer
+        Literal        <- Boolean / Integer / Real 
 
         SimpleSymbol   <- < [a-zA-Z_?~!$%^&*+=<>/-][a-zA-Z0-9_?~!$%^&*+=<>/-@.]* >
         QuotedSymbol   <- < '|' (!'|' .)* '|' >

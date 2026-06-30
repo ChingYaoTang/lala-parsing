@@ -65,7 +65,7 @@ CSV_FIELDS = [
     "parse_success",
     "failure_kind",
     "signal_name",
-    "diagnostic",
+    "error_message",
     "max_sexpr_depth",
     *STAT_FIELDS,
 ]
@@ -234,7 +234,7 @@ def run_one(probe: Path, root: Path, smt_file: Path, timing_only: bool) -> Dict[
       "signal_name": "",
       "parse_seconds": "",
       "max_sexpr_depth": max_sexpr_depth(smt_file),
-      "diagnostic": "",
+      "error_message": "",
   }
   blank_stats(row)
 
@@ -259,7 +259,7 @@ def run_one(probe: Path, root: Path, smt_file: Path, timing_only: bool) -> Dict[
     row["parse_success"] = 1 if success else 0
     row["failure_kind"] = "" if success else "parser_fail"
     row["parse_seconds"] = probe_json.get("parse_seconds", elapsed)
-    row["diagnostic"] = "" if success else str(probe_json.get("diagnostic", ""))
+    row["error_message"] = "" if success else str(probe_json.get("diagnostic", ""))
     if stats_collected:
       row["theory"] = str(probe_json.get("theory", ""))
       row["expected_status"] = str(probe_json.get("expected_status", ""))
@@ -269,7 +269,7 @@ def run_one(probe: Path, root: Path, smt_file: Path, timing_only: bool) -> Dict[
     return row
 
   row["parse_seconds"] = elapsed
-  row["diagnostic"] = output_snippet(result.stdout, result.stderr)
+  row["error_message"] = output_snippet(result.stdout, result.stderr)
   if result.returncode < 0:
     signum = -result.returncode
     row["signal_name"] = signal_name(result.returncode)
@@ -282,7 +282,11 @@ def run_one(probe: Path, root: Path, smt_file: Path, timing_only: bool) -> Dict[
 def write_rows_streaming(root: Path, probe: Path, output: Path, jobs: int, timing_only: bool) -> int:
   output.parent.mkdir(parents=True, exist_ok=True)
   processed = 0
-  files = iter_smt2_files(root)
+  files = list(iter_smt2_files(root))
+  total = len(files)
+  print(f"Total SMT2 files: {total}", flush=True)
+  next_progress_percent = 1
+  file_iter = iter(files)
 
   with output.open("w", newline="", encoding="utf-8") as csv_file:
     writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
@@ -294,7 +298,7 @@ def write_rows_streaming(root: Path, probe: Path, output: Path, jobs: int, timin
 
       def submit_next() -> bool:
         try:
-          smt_file = next(files)
+          smt_file = next(file_iter)
         except StopIteration:
           return False
         pending.add(executor.submit(run_one, probe, root, smt_file, timing_only))
@@ -311,6 +315,11 @@ def write_rows_streaming(root: Path, probe: Path, output: Path, jobs: int, timin
           writer.writerow(row)
           csv_file.flush()
           processed += 1
+          if total > 0:
+            progress_percent = int(processed * 100 / total)
+            if progress_percent >= next_progress_percent or processed == total:
+              print(f"Progress: processed {processed}/{total} ({progress_percent}%)", flush=True)
+              next_progress_percent = progress_percent + 1
           submit_next()
 
   return processed
